@@ -164,24 +164,35 @@ mod imp {
             );
             self.call_screen.set(call_screen).unwrap();
 
-            // Banner button: "Configure" opens settings; "Copy" copies the error text.
+            // Banner button: "Connect" connects directly, "Configure" opens settings,
+            // "Copy" copies the error text to clipboard.
             self.status_banner.connect_button_clicked(glib::clone!(
                 #[weak]
                 obj,
                 move |banner| {
-                    if banner.button_label().as_deref() == Some("Copy") {
-                        if let Some(display) = banner.display().downcast::<gtk4::gdk::Display>().ok() {
-                            display.clipboard().set_text(banner.title().as_str());
+                    match banner.button_label().as_deref() {
+                        Some("Copy") => {
+                            if let Some(display) = banner.display().downcast::<gtk4::gdk::Display>().ok() {
+                                display.clipboard().set_text(banner.title().as_str());
+                            }
                         }
-                    } else {
-                        obj.open_settings_dialog();
+                        Some("Connect") => {
+                            obj.imp().on_connect_requested();
+                        }
+                        _ => {
+                            obj.open_settings_dialog();
+                        }
                     }
                 }
             ));
 
-            // Update banner based on current settings
+            // Show "Connect" if credentials are already saved, otherwise prompt to configure.
             let settings = gio::Settings::new("net.loca.TMWPhone");
-            if settings.string("sip-username").is_empty() {
+            let has_credentials = !settings.string("sip-username").is_empty()
+                && !settings.string("sip-server").is_empty();
+            if has_credentials {
+                self.status_banner.set_button_label(Some("Connect"));
+            } else {
                 self.status_banner.set_title("Not registered — tap Configure");
             }
         }
