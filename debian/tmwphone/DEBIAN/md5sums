@@ -1,0 +1,5 @@
+019dbc8ea0687e69e927a1391637976c  usr/bin/tmwphone
+797e7745d2641c1d36bd8286817dea05  usr/share/applications/net.loca.TMWPhone.desktop
+5200daa720af8fc730624ba82b21d863  usr/share/doc/tmwphone/changelog.Debian.gz
+36eb414c6d28cc386281fa38df9ebd08  usr/share/doc/tmwphone/copyright
+37150344cef33b82ab2ad49d98aa0445  usr/share/glib-2.0/schemas/net.loca.TMWPhone.gschema.xml

@@ -14,14 +14,14 @@ override_dh_auto_configure:
 	: # nothing to configure
 
 override_dh_auto_build:
-	cargo build --release --bin locaclient
+	cargo build --release --bin tmwphone
 
 override_dh_auto_test:
 	: # no tests
 
 override_dh_auto_install:
-	install -D -m 755 target/release/locaclient \
-		debian/locaclient/usr/bin/locaclient
+	install -D -m 755 target/release/tmwphone \
+		debian/tmwphone/usr/bin/tmwphone
 
 override_dh_auto_clean:
 	cargo clean || true

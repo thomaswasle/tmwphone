@@ -1,4 +1,4 @@
-Source: locaclient
+Source: tmwphone
 Section: net
 Priority: optional
 Maintainer: Thomas Müller-Wasle <mueller@loca.net>
@@ -17,13 +17,13 @@ Build-Depends: debhelper-compat (= 13),
 Standards-Version: 4.7.0
 Rules-Requires-Root: no
 
-Package: locaclient
+Package: tmwphone
 Architecture: any
 Depends: ${shlibs:Depends}, ${misc:Depends},
          gstreamer1.0-plugins-good,
          gstreamer1.0-plugins-base,
          gstreamer1.0-pulseaudio
 Description: SIP softphone client for GNOME
- Loca Client is a SIP softphone designed for the GNOME desktop.
+ TMWPhone is a SIP softphone designed for the GNOME desktop.
  It provides a clean, native GNOME user interface for making
  and receiving VoIP calls via the SIP protocol.

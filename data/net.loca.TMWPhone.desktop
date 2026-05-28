@@ -1,10 +1,10 @@
 [Desktop Entry]
-Name=Loca Client
+Name=TMWPhone
 Comment=SIP Softphone
-Exec=locaclient
-Icon=net.loca.Client
+Exec=tmwphone
+Icon=net.loca.TMWPhone
 Terminal=false
 Type=Application
 Categories=Network;Telephony;
 Keywords=SIP;VoIP;phone;call;
-StartupWMClass=net.loca.Client
+StartupWMClass=net.loca.TMWPhone

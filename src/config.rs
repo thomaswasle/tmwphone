@@ -7,7 +7,7 @@ pub struct Config {
 impl Config {
     pub fn new() -> Self {
         Config {
-            settings: Settings::new("net.loca.Client"),
+            settings: Settings::new("net.loca.TMWPhone"),
         }
     }
 

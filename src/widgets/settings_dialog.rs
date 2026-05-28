@@ -48,7 +48,7 @@ mod imp {
         fn constructed(&self) {
             self.parent_constructed();
 
-            let settings = gio::Settings::new("net.loca.Client");
+            let settings = gio::Settings::new("net.loca.TMWPhone");
             self.display_name_row
                 .set_text(&settings.string("sip-display-name"));
             self.username_row
@@ -72,7 +72,7 @@ mod imp {
 
     impl SettingsDialog {
         fn on_save_and_connect(&self) {
-            let settings = gio::Settings::new("net.loca.Client");
+            let settings = gio::Settings::new("net.loca.TMWPhone");
             settings
                 .set_string("sip-display-name", &self.display_name_row.text())
                 .unwrap();

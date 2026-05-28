@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-`locaclient` is a GNOME SIP softphone for Linux, written in Rust with GTK4 + libadwaita. It uses sofia-sip for SIP signaling (via a C glue layer) and GStreamer for RTP audio.
+`tmwphone` (TMWPhone) is a GNOME SIP softphone for Linux, written in Rust with GTK4 + libadwaita. It uses sofia-sip for SIP signaling (via a C glue layer) and GStreamer for RTP audio.
 
 ## Build & Run
 
@@ -22,7 +22,7 @@ cargo run
 RUST_LOG=debug cargo run
 ```
 
-`build.rs` runs `glib-compile-schemas data/` on every build, so changes to `data/net.loca.Client.gschema.xml` are picked up automatically. It also compiles `src/sip/glue.c` via the `cc` crate.
+`build.rs` runs `glib-compile-schemas data/` on every build, so changes to `data/net.loca.TMWPhone.gschema.xml` are picked up automatically. It also compiles `src/sip/glue.c` via the `cc` crate.
 
 There are no tests currently.
 
@@ -46,7 +46,7 @@ window.rs          — MainWindow: top-level UI orchestration, owns SipEngine + 
 - SDP is built and parsed manually (`build_audio_sdp`, `extract_rtp_from_sip`) — `NUTAG_MEDIA_ENABLE(0)` disables sofia's own SDP handling.
 - Digest auth for INVITE is done manually (`invite_with_digest`) because `nua_authenticate` is broken in libsofia-sip-ua 1.12.11.
 - DTMF is sent via SIP INFO (`application/dtmf-relay`), not RFC 2833 RTP.
-- **`mod.rs`** converts C events into `SipEvent` enum values sent over an `async_channel`. `MainWindow` spawns a `glib::MainContext::spawn_local` task that reads from this channel.
+- **`mod.rs`** converts C events into `SipEvent` enum values and invokes a closure directly on the GTK main thread (sofia NUA callbacks arrive on the main thread via the GLib event loop).
 
 ### Audio layer (`src/audio.rs`)
 
@@ -64,7 +64,7 @@ window.rs          — MainWindow: top-level UI orchestration, owns SipEngine + 
 
 ### GSettings
 
-Schema: `net.loca.Client` (`data/net.loca.Client.gschema.xml`). Keys: `sip-server`, `sip-username`, `sip-password` (plaintext, dev only — TODO: migrate to libsecret), `sip-display-name`, `sip-port`. Settings are read directly from `gio::Settings` in `window.rs`; the `src/config.rs` wrapper is unused.
+Schema: `net.loca.TMWPhone` (`data/net.loca.TMWPhone.gschema.xml`). Keys: `sip-server`, `sip-username`, `sip-password` (plaintext, dev only — TODO: migrate to libsecret), `sip-display-name`, `sip-port`. Settings are read directly from `gio::Settings` in `window.rs`; the `src/config.rs` wrapper is unused.
 
 ## Key constraints
 

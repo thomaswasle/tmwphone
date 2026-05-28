@@ -11,7 +11,7 @@ mod imp {
 
     #[glib::object_subclass]
     impl ObjectSubclass for App {
-        const NAME: &'static str = "LocaClientApp";
+        const NAME: &'static str = "TMWPhoneApp";
         type Type = super::App;
         type ParentType = adw::Application;
     }
@@ -76,9 +76,9 @@ mod imp {
                 app,
                 move |_, _| {
                     let dialog = adw::AboutDialog::builder()
-                        .application_name("Loca Client")
-                        .application_icon("net.loca.Client")
-                        .developer_name("Loca")
+                        .application_name("TMWPhone")
+                        .application_icon("net.loca.TMWPhone")
+                        .developer_name("Thomas Müller-Wasle")
                         .version(env!("CARGO_PKG_VERSION"))
                         .build();
                     dialog.present(app.active_window().as_ref());
@@ -101,7 +101,7 @@ glib::wrapper! {
 impl App {
     pub fn new() -> Self {
         glib::Object::builder()
-            .property("application-id", "net.loca.Client")
+            .property("application-id", "net.loca.TMWPhone")
             .property("flags", gio::ApplicationFlags::FLAGS_NONE)
             .build()
     }

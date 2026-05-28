@@ -180,7 +180,7 @@ mod imp {
             ));
 
             // Update banner based on current settings
-            let settings = gio::Settings::new("net.loca.Client");
+            let settings = gio::Settings::new("net.loca.TMWPhone");
             if settings.string("sip-username").is_empty() {
                 self.status_banner.set_title("Not registered — tap Configure");
             }
@@ -196,7 +196,7 @@ mod imp {
         pub fn handle_sip_event(&self, event: SipEvent) {
             match event {
                 SipEvent::Registered => {
-                    let settings = gio::Settings::new("net.loca.Client");
+                    let settings = gio::Settings::new("net.loca.TMWPhone");
                     let user = settings.string("sip-username");
                     let server = settings.string("sip-server");
                     self.status_banner.set_revealed(false);
@@ -287,7 +287,7 @@ mod imp {
         }
 
         pub fn on_connect_requested(&self) {
-            let settings = gio::Settings::new("net.loca.Client");
+            let settings = gio::Settings::new("net.loca.TMWPhone");
 
             // Accept "host" or "host:port" in the server field.
             let server_raw = settings.string("sip-server").to_string();

@@ -1,6 +1,6 @@
 fn main() {
     // ── GSettings schema ──────────────────────────────────────────────────────
-    println!("cargo:rerun-if-changed=data/net.loca.Client.gschema.xml");
+    println!("cargo:rerun-if-changed=data/net.loca.TMWPhone.gschema.xml");
     let ok = std::process::Command::new("glib-compile-schemas")
         .arg("data/")
         .status()

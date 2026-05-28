@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="net.loca.TMWPhone" path="/net/loca/tmwphone/">
+
+    <key name="sip-server" type="s">
+      <default>''</default>
+      <summary>SIP registrar hostname or IP</summary>
+    </key>
+
+    <key name="sip-username" type="s">
+      <default>''</default>
+      <summary>SIP account username</summary>
+    </key>
+
+    <!-- TODO: migrate to libsecret / GNOME Keyring for production -->
+    <key name="sip-password" type="s">
+      <default>''</default>
+      <summary>SIP account password (plaintext — dev only)</summary>
+    </key>
+
+    <key name="sip-display-name" type="s">
+      <default>''</default>
+      <summary>Caller-ID display name</summary>
+    </key>
+
+    <key name="sip-port" type="i">
+      <default>5060</default>
+      <range min="1" max="65535"/>
+      <summary>SIP registrar port</summary>
+    </key>
+
+    <key name="audio-input-device" type="i">
+      <default>-1</default>
+      <summary>PJSUA2 capture device index (-1 = system default)</summary>
+    </key>
+
+    <key name="audio-output-device" type="i">
+      <default>-1</default>
+      <summary>PJSUA2 playback device index (-1 = system default)</summary>
+    </key>
+
+  </schema>
+</schemalist>
