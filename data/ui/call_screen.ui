@@ -1,0 +1,246 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface>
+  <requires lib="gtk" version="4.0"/>
+  <requires lib="libadwaita" version="1.0"/>
+  <template class="CallScreen" parent="AdwBin">
+    <!-- Full-window overlay with dark translucent background -->
+    <child>
+      <object class="GtkBox">
+        <property name="orientation">vertical</property>
+        <property name="vexpand">true</property>
+        <property name="hexpand">true</property>
+        <property name="valign">fill</property>
+        <property name="halign">fill</property>
+        <style><class name="call-screen"/></style>
+
+        <child>
+          <object class="GtkBox">
+            <property name="orientation">vertical</property>
+            <property name="vexpand">true</property>
+            <property name="valign">center</property>
+            <property name="spacing">8</property>
+
+            <!-- Avatar placeholder -->
+            <child>
+              <object class="AdwAvatar">
+                <property name="size">72</property>
+                <property name="halign">center</property>
+                <property name="show-initials">true</property>
+              </object>
+            </child>
+
+            <!-- Caller label -->
+            <child>
+              <object class="GtkLabel" id="caller_label">
+                <property name="label">Unknown</property>
+                <property name="halign">center</property>
+                <property name="ellipsize">end</property>
+                <property name="max-width-chars">28</property>
+                <style><class name="title-2"/></style>
+              </object>
+            </child>
+
+            <!-- Duration / status -->
+            <child>
+              <object class="GtkLabel" id="duration_label">
+                <property name="label">Calling…</property>
+                <property name="halign">center</property>
+                <style><class name="title-4"/><class name="dim-label"/></style>
+              </object>
+            </child>
+          </object>
+        </child>
+
+        <!-- In-call controls (mute / hold / dtmf) -->
+        <child>
+          <object class="GtkBox">
+            <property name="halign">center</property>
+            <property name="spacing">24</property>
+            <property name="margin-bottom">16</property>
+
+            <child>
+              <object class="GtkToggleButton" id="mute_button">
+                <property name="icon-name">microphone-sensitivity-muted-symbolic</property>
+                <property name="tooltip-text">Mute</property>
+                <signal name="toggled" handler="on_mute_toggled" swapped="yes"/>
+                <style><class name="circular"/><class name="flat"/></style>
+              </object>
+            </child>
+
+            <child>
+              <object class="GtkToggleButton" id="hold_button">
+                <property name="icon-name">media-playback-pause-symbolic</property>
+                <property name="tooltip-text">Hold</property>
+                <signal name="toggled" handler="on_hold_toggled" swapped="yes"/>
+                <style><class name="circular"/><class name="flat"/></style>
+              </object>
+            </child>
+
+            <child>
+              <object class="GtkToggleButton" id="dtmf_button">
+                <property name="icon-name">input-dialpad-symbolic</property>
+                <property name="tooltip-text">DTMF keypad</property>
+                <signal name="toggled" handler="on_dtmf_toggled" swapped="yes"/>
+                <style><class name="circular"/><class name="flat"/></style>
+              </object>
+            </child>
+          </object>
+        </child>
+
+        <!-- DTMF keypad (slides in when dtmf_button is active) -->
+        <child>
+          <object class="GtkRevealer" id="dtmf_revealer">
+            <property name="reveal-child">false</property>
+            <property name="transition-type">slide-down</property>
+            <property name="margin-bottom">8</property>
+            <child>
+              <object class="GtkGrid">
+                <property name="row-spacing">8</property>
+                <property name="column-spacing">16</property>
+                <property name="halign">center</property>
+
+                <child>
+                  <object class="GtkButton">
+                    <property name="label">1</property>
+                    <signal name="clicked" handler="on_dtmf_key_clicked" swapped="yes"/>
+                    <style><class name="circular"/><class name="flat"/></style>
+                    <layout><property name="column">0</property><property name="row">0</property></layout>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkButton">
+                    <property name="label">2</property>
+                    <signal name="clicked" handler="on_dtmf_key_clicked" swapped="yes"/>
+                    <style><class name="circular"/><class name="flat"/></style>
+                    <layout><property name="column">1</property><property name="row">0</property></layout>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkButton">
+                    <property name="label">3</property>
+                    <signal name="clicked" handler="on_dtmf_key_clicked" swapped="yes"/>
+                    <style><class name="circular"/><class name="flat"/></style>
+                    <layout><property name="column">2</property><property name="row">0</property></layout>
+                  </object>
+                </child>
+
+                <child>
+                  <object class="GtkButton">
+                    <property name="label">4</property>
+                    <signal name="clicked" handler="on_dtmf_key_clicked" swapped="yes"/>
+                    <style><class name="circular"/><class name="flat"/></style>
+                    <layout><property name="column">0</property><property name="row">1</property></layout>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkButton">
+                    <property name="label">5</property>
+                    <signal name="clicked" handler="on_dtmf_key_clicked" swapped="yes"/>
+                    <style><class name="circular"/><class name="flat"/></style>
+                    <layout><property name="column">1</property><property name="row">1</property></layout>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkButton">
+                    <property name="label">6</property>
+                    <signal name="clicked" handler="on_dtmf_key_clicked" swapped="yes"/>
+                    <style><class name="circular"/><class name="flat"/></style>
+                    <layout><property name="column">2</property><property name="row">1</property></layout>
+                  </object>
+                </child>
+
+                <child>
+                  <object class="GtkButton">
+                    <property name="label">7</property>
+                    <signal name="clicked" handler="on_dtmf_key_clicked" swapped="yes"/>
+                    <style><class name="circular"/><class name="flat"/></style>
+                    <layout><property name="column">0</property><property name="row">2</property></layout>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkButton">
+                    <property name="label">8</property>
+                    <signal name="clicked" handler="on_dtmf_key_clicked" swapped="yes"/>
+                    <style><class name="circular"/><class name="flat"/></style>
+                    <layout><property name="column">1</property><property name="row">2</property></layout>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkButton">
+                    <property name="label">9</property>
+                    <signal name="clicked" handler="on_dtmf_key_clicked" swapped="yes"/>
+                    <style><class name="circular"/><class name="flat"/></style>
+                    <layout><property name="column">2</property><property name="row">2</property></layout>
+                  </object>
+                </child>
+
+                <child>
+                  <object class="GtkButton">
+                    <property name="label">*</property>
+                    <signal name="clicked" handler="on_dtmf_key_clicked" swapped="yes"/>
+                    <style><class name="circular"/><class name="flat"/></style>
+                    <layout><property name="column">0</property><property name="row">3</property></layout>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkButton">
+                    <property name="label">0</property>
+                    <signal name="clicked" handler="on_dtmf_key_clicked" swapped="yes"/>
+                    <style><class name="circular"/><class name="flat"/></style>
+                    <layout><property name="column">1</property><property name="row">3</property></layout>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkButton">
+                    <property name="label">#</property>
+                    <signal name="clicked" handler="on_dtmf_key_clicked" swapped="yes"/>
+                    <style><class name="circular"/><class name="flat"/></style>
+                    <layout><property name="column">2</property><property name="row">3</property></layout>
+                  </object>
+                </child>
+
+              </object>
+            </child>
+          </object>
+        </child>
+
+        <!-- Answer / Hangup row -->
+        <child>
+          <object class="GtkBox">
+            <property name="halign">center</property>
+            <property name="spacing">48</property>
+            <property name="margin-bottom">48</property>
+
+            <!-- Answer (visible only for incoming calls) -->
+            <child>
+              <object class="GtkButton" id="answer_button">
+                <property name="icon-name">call-start-symbolic</property>
+                <property name="tooltip-text">Answer</property>
+                <property name="visible">false</property>
+                <signal name="clicked" handler="on_answer_clicked" swapped="yes"/>
+                <style>
+                  <class name="circular"/>
+                  <class name="suggested-action"/>
+                </style>
+              </object>
+            </child>
+
+            <!-- Hangup -->
+            <child>
+              <object class="GtkButton" id="hangup_button">
+                <property name="icon-name">call-stop-symbolic</property>
+                <property name="tooltip-text">Hang up</property>
+                <signal name="clicked" handler="on_hangup_clicked" swapped="yes"/>
+                <style>
+                  <class name="circular"/>
+                  <class name="destructive-action"/>
+                </style>
+              </object>
+            </child>
+          </object>
+        </child>
+
+      </object>
+    </child>
+  </template>
+</interface>

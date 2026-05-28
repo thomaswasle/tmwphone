@@ -1,0 +1,6 @@
+#!/usr/bin/make -f
+
+export DH_CARGO_INSTALL_ARGS = --bin locaclient
+
+%:
+	dh $@ --buildsystem=cargo

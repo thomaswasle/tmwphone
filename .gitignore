@@ -1,0 +1,25 @@
+# Rust / Cargo
+/target/
+Cargo.lock
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Build artifacts
+*.o
+*.a
+*.so
+*.d
+data/gschemas.compiled
+
+# Debian packaging
+debian/.debhelper/
+debian/debhelper-build-stamp
+debian/files
+debian/locaclient/
+debian/locaclient.substvars

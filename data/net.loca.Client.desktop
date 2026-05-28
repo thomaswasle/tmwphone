@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Loca Client
+Comment=SIP Softphone
+Exec=locaclient
+Icon=net.loca.Client
+Terminal=false
+Type=Application
+Categories=Network;Telephony;
+Keywords=SIP;VoIP;phone;call;
+StartupWMClass=net.loca.Client

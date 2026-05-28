@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface>
+  <requires lib="gtk" version="4.0"/>
+  <requires lib="libadwaita" version="1.0"/>
+  <template class="MainWindow" parent="AdwApplicationWindow">
+    <property name="title">Loca Client</property>
+    <property name="default-width">360</property>
+    <property name="default-height">640</property>
+
+    <child>
+      <!-- GtkOverlay lets the CallScreen float above everything -->
+      <object class="GtkOverlay" id="overlay">
+        <property name="hexpand">true</property>
+        <property name="vexpand">true</property>
+
+        <!-- Base layer: normal app chrome -->
+        <child>
+          <object class="AdwToastOverlay" id="toast_overlay">
+            <child>
+              <object class="AdwToolbarView">
+
+                <child type="top">
+                  <object class="AdwHeaderBar">
+                    <child type="end">
+                      <object class="GtkMenuButton">
+                        <property name="icon-name">open-menu-symbolic</property>
+                        <property name="menu-model">primary_menu</property>
+                        <property name="tooltip-text">Main menu</property>
+                      </object>
+                    </child>
+                    <child type="title">
+                      <object class="AdwViewSwitcher">
+                        <property name="stack">view_stack</property>
+                        <property name="policy">wide</property>
+                      </object>
+                    </child>
+                  </object>
+                </child>
+
+                <child type="bottom">
+                  <object class="AdwViewSwitcherBar">
+                    <property name="stack">view_stack</property>
+                    <property name="reveal">true</property>
+                  </object>
+                </child>
+
+                <property name="content">
+                  <object class="GtkBox">
+                    <property name="orientation">vertical</property>
+
+                    <child>
+                      <object class="AdwBanner" id="status_banner">
+                        <property name="title">Not registered</property>
+                        <property name="revealed">true</property>
+                        <property name="button-label">Configure</property>
+                      </object>
+                    </child>
+
+                    <child>
+                      <object class="AdwViewStack" id="view_stack">
+                        <property name="vexpand">true</property>
+                      </object>
+                    </child>
+                  </object>
+                </property>
+
+              </object>
+            </child>
+          </object>
+        </child>
+
+        <!-- Overlay layer: call screen (hidden until a call is active) -->
+        <child type="overlay">
+          <object class="GtkRevealer" id="call_revealer">
+            <property name="transition-type">crossfade</property>
+            <property name="reveal-child">false</property>
+            <property name="hexpand">true</property>
+            <property name="vexpand">true</property>
+            <property name="can-target">false</property>
+          </object>
+        </child>
+
+      </object>
+    </child>
+  </template>
+
+  <menu id="primary_menu">
+    <section>
+      <item>
+        <attribute name="label" translatable="yes">_Preferences</attribute>
+        <attribute name="action">app.preferences</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">_About Loca Client</attribute>
+        <attribute name="action">app.about</attribute>
+      </item>
+    </section>
+    <section>
+      <item>
+        <attribute name="label" translatable="yes">_Quit</attribute>
+        <attribute name="action">app.quit</attribute>
+      </item>
+    </section>
+  </menu>
+</interface>
