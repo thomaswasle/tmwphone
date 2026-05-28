@@ -1,6 +1,5 @@
 # Rust / Cargo
 /target/
-Cargo.lock
 
 # Editor / IDE
 .vscode/
@@ -21,5 +20,5 @@ data/gschemas.compiled
 debian/.debhelper/
 debian/debhelper-build-stamp
 debian/files
-debian/locaclient/
-debian/locaclient.substvars
+debian/tmwphone/
+debian/tmwphone.substvars
