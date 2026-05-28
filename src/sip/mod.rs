@@ -1,6 +1,5 @@
 mod ffi;
 
-use async_channel::{Receiver, Sender};
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::fmt;
 
@@ -31,10 +30,14 @@ pub struct SipConfig {
 
 // ── Engine ────────────────────────────────────────────────────────────────────
 
+// Type-erased event handler stored on the heap so we can pass a thin pointer
+// to the C layer as userdata.
+type HandlerBox = Box<dyn FnMut(SipEvent)>;
+
 pub struct SipEngine {
     ctx: *mut ffi::SofiaCtx,
-    // Keeps the Box<Sender> alive; its raw ptr is held by the C callback.
-    _cb_tx: *mut Sender<SipEvent>,
+    // Keeps the Box<HandlerBox> alive; its raw ptr is held by the C callback.
+    _handler: *mut HandlerBox,
 }
 
 impl fmt::Debug for SipEngine {
@@ -49,8 +52,8 @@ impl Drop for SipEngine {
             if !self.ctx.is_null() {
                 ffi::sofia_ctx_destroy(self.ctx);
             }
-            if !self._cb_tx.is_null() {
-                drop(Box::from_raw(self._cb_tx));
+            if !self._handler.is_null() {
+                drop(Box::from_raw(self._handler));
             }
         }
     }
@@ -61,9 +64,11 @@ impl Drop for SipEngine {
 // Explicitly not Send.
 
 impl SipEngine {
-    pub fn new(server: &str, port: u16) -> (Self, Receiver<SipEvent>) {
-        let (tx, rx) = async_channel::unbounded::<SipEvent>();
-        let cb_tx: *mut Sender<SipEvent> = Box::into_raw(Box::new(tx));
+    /// Create a new engine.  `on_event` will be called on the GTK main thread
+    /// whenever the SIP stack fires an event (sofia runs on the GLib main loop).
+    pub fn new(server: &str, port: u16, on_event: impl FnMut(SipEvent) + 'static) -> Self {
+        // Double-box so we get a thin (data-only) pointer suitable for c_void.
+        let handler: *mut HandlerBox = Box::into_raw(Box::new(Box::new(on_event)));
 
         let server_c = CString::new(server).unwrap_or_default();
         let ctx = unsafe {
@@ -71,21 +76,21 @@ impl SipEngine {
                 server_c.as_ptr(),
                 port as c_int,
                 sofia_event_cb,
-                cb_tx as *mut c_void,
+                handler as *mut c_void,
             )
         };
         if ctx.is_null() {
             log::error!("sofia_ctx_create failed — SIP stack could not initialize");
-            unsafe { drop(Box::from_raw(cb_tx)) };
-            let (tx2, rx2) = async_channel::unbounded::<SipEvent>();
-            tx2.try_send(SipEvent::RegistrationFailed(
-                "SIP stack failed to start".into(),
-            ))
-            .ok();
-            return (SipEngine { ctx: std::ptr::null_mut(), _cb_tx: std::ptr::null_mut() }, rx2);
+            // Fire the failure event synchronously before returning a dead engine.
+            unsafe {
+                let cb: &mut HandlerBox = &mut *handler;
+                cb(SipEvent::RegistrationFailed("SIP stack failed to start".into()));
+                drop(Box::from_raw(handler));
+            }
+            return SipEngine { ctx: std::ptr::null_mut(), _handler: std::ptr::null_mut() };
         }
 
-        (SipEngine { ctx, _cb_tx: cb_tx }, rx)
+        SipEngine { ctx, _handler: handler }
     }
 
     pub fn register(&self, config: SipConfig) {
@@ -127,7 +132,8 @@ impl SipEngine {
     }
 
     pub fn set_hold(&self, hold: bool) {
-        log::debug!("set_hold({hold}) — re-INVITE not yet implemented");
+        if self.ctx.is_null() { return; }
+        unsafe { ffi::sofia_set_hold(self.ctx, hold as c_int) }
     }
 
     pub fn send_dtmf(&self, digit: char) {
@@ -139,7 +145,7 @@ impl SipEngine {
     }
 }
 
-// ── C callback (fires on the GLib main thread) ────────────────────────────────
+// ── C callback (always fires on the GTK main thread) ─────────────────────────
 
 unsafe extern "C" fn sofia_event_cb(
     event: c_int,
@@ -148,7 +154,7 @@ unsafe extern "C" fn sofia_event_cb(
     aux: *const c_char,
     userdata: *mut c_void,
 ) {
-    let tx: &Sender<SipEvent> = &*(userdata as *const Sender<SipEvent>);
+    let cb: &mut HandlerBox = &mut *(userdata as *mut HandlerBox);
 
     let phrase_str = || {
         if phrase.is_null() {
@@ -199,6 +205,6 @@ unsafe extern "C" fn sofia_event_cb(
 
     if let Some(ev) = ev {
         log::debug!("SIP event: {ev:?}");
-        tx.try_send(ev).ok();
+        cb(ev);
     }
 }

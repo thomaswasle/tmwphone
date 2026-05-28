@@ -3,12 +3,16 @@ Section: net
 Priority: optional
 Maintainer: Thomas Müller-Wasle <mueller@loca.net>
 Build-Depends: debhelper-compat (= 13),
-               dh-cargo (>= 25),
+               cargo,
+               rustc,
                libgtk-4-dev,
                libadwaita-1-dev,
                libsofia-sip-ua-dev,
+               libsofia-sip-ua-glib-dev,
                libglib2.0-dev,
                libglib2.0-bin,
+               libgstreamer1.0-dev,
+               libgstreamer-plugins-base1.0-dev,
                pkg-config
 Standards-Version: 4.7.0
 Rules-Requires-Root: no
@@ -16,9 +20,9 @@ Rules-Requires-Root: no
 Package: locaclient
 Architecture: any
 Depends: ${shlibs:Depends}, ${misc:Depends},
-         libgtk-4-1 | libgtk-4-1t64,
-         libadwaita-1-0,
-         libsofia-sip-ua1
+         gstreamer1.0-plugins-good,
+         gstreamer1.0-plugins-base,
+         gstreamer1.0-pulseaudio
 Description: SIP softphone client for GNOME
  Loca Client is a SIP softphone designed for the GNOME desktop.
  It provides a clean, native GNOME user interface for making

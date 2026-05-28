@@ -49,6 +49,10 @@ void sofia_answer(SofiaCtx *ctx);
 /* Hang up current call (BYE) or reject incoming call (603). */
 void sofia_hangup(SofiaCtx *ctx);
 
+/* Put current call on hold (hold=1) or resume it (hold=0) via re-INVITE.
+   On hold the SDP direction is set to "sendonly"; on resume to "sendrecv". */
+void sofia_set_hold(SofiaCtx *ctx, int hold);
+
 /* Send a DTMF digit over the current call via SIP INFO (application/dtmf-relay).
    digit must be '0'-'9', '*', or '#'. */
 void sofia_send_dtmf(SofiaCtx *ctx, char digit);

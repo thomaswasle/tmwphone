@@ -41,5 +41,6 @@ extern "C" {
     pub fn sofia_call(ctx: *mut SofiaCtx, number: *const c_char);
     pub fn sofia_answer(ctx: *mut SofiaCtx);
     pub fn sofia_hangup(ctx: *mut SofiaCtx);
+    pub fn sofia_set_hold(ctx: *mut SofiaCtx, hold: c_int);
     pub fn sofia_send_dtmf(ctx: *mut SofiaCtx, digit: c_char);
 }

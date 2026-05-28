@@ -1,6 +1,27 @@
 #!/usr/bin/make -f
 
-export DH_CARGO_INSTALL_ARGS = --bin locaclient
+# Prepend the apt-installed Rust binaries so rustc is found without going
+# through a rustup shim that may have no default toolchain configured.
+RUST_BINDIR := $(firstword $(wildcard /usr/lib/rust-*/bin))
+ifneq ($(RUST_BINDIR),)
+export PATH := $(RUST_BINDIR):$(PATH)
+endif
 
 %:
-	dh $@ --buildsystem=cargo
+	dh $@
+
+override_dh_auto_configure:
+	: # nothing to configure
+
+override_dh_auto_build:
+	cargo build --release --bin locaclient
+
+override_dh_auto_test:
+	: # no tests
+
+override_dh_auto_install:
+	install -D -m 755 target/release/locaclient \
+		debian/locaclient/usr/bin/locaclient
+
+override_dh_auto_clean:
+	cargo clean || true

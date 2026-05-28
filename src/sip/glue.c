@@ -9,7 +9,6 @@
 #include <glib.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdio.h>
 #include <netdb.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
@@ -39,6 +38,8 @@ struct SofiaCtx {
     int               remote_rtp_payload; /* selected RTP payload type (0=PCMU, 8=PCMA) */
 
     gboolean          call_auth_tried;  /* true after first digest attempt */
+    gboolean          call_established; /* true after the first 200 OK for INVITE */
+    gboolean          call_on_hold;
     gboolean          shutting_down;
     gboolean          shutdown_done;
 };
@@ -91,10 +92,8 @@ static int get_free_udp_port(void) {
 /* Extract the first audio stream's connection address, port, and selected
    payload type from the SDP body of a SIP message. */
 static void extract_rtp_from_sip(SofiaCtx *ctx, sip_t const *sip) {
-    if (!sip || !sip->sip_payload || !sip->sip_payload->pl_data) {
-        fprintf(stderr, "[glue] extract_rtp_from_sip: no SDP payload\n");
+    if (!sip || !sip->sip_payload || !sip->sip_payload->pl_data)
         return;
-    }
 
     su_home_t home[1];
     su_home_init(home);
@@ -127,20 +126,15 @@ static void extract_rtp_from_sip(SofiaCtx *ctx, sip_t const *sip) {
             }
             break;
         }
-    } else {
-        fprintf(stderr, "[glue] extract_rtp_from_sip: SDP parse failed\n");
     }
-
-    fprintf(stderr, "[glue] rtp: remote=%s:%d payload=%d local_port=%d\n",
-            ctx->remote_rtp_ip, ctx->remote_rtp_port,
-            ctx->remote_rtp_payload, ctx->local_rtp_port);
 
     su_home_deinit(home);
 }
 
 /* Build an SDP offer/answer for ctx->local_ip:port.
-   Offer PCMU + PCMA + telephone-event for broad Asterisk compatibility. */
-static void build_audio_sdp(SofiaCtx *ctx, char *buf, size_t len) {
+   direction is "sendrecv", "sendonly", or "recvonly". */
+static void build_audio_sdp(SofiaCtx *ctx, char *buf, size_t len,
+                             const char *direction) {
     snprintf(buf, len,
         "v=0\r\n"
         "o=- 0 0 IN IP4 %s\r\n"
@@ -153,8 +147,8 @@ static void build_audio_sdp(SofiaCtx *ctx, char *buf, size_t len) {
         "a=rtpmap:101 telephone-event/8000\r\n"
         "a=fmtp:101 0-15\r\n"
         "a=ptime:20\r\n"
-        "a=sendrecv\r\n",
-        ctx->local_ip, ctx->local_ip, ctx->local_rtp_port);
+        "a=%s\r\n",
+        ctx->local_ip, ctx->local_ip, ctx->local_rtp_port, direction);
 }
 
 /* ── Auth helpers ─────────────────────────────────────────────────────────── */
@@ -192,7 +186,6 @@ static void invite_with_digest(SofiaCtx *ctx, sip_t const *sip, int status)
 
     /* Only attempt auth once per call to prevent infinite retry loops. */
     if (ctx->call_auth_tried) {
-        fprintf(stderr, "[glue] invite_with_digest: already tried once, giving up\n");
         ctx->cb(SOFIA_EV_CALL_FAILED, status, "Authentication failed", NULL, ctx->userdata);
         if (ctx->call_nh) { nua_handle_unref(ctx->call_nh); ctx->call_nh = NULL; }
         return;
@@ -256,9 +249,6 @@ static void invite_with_digest(SofiaCtx *ctx, sip_t const *sip, int status)
         snprintf(auth_hdr + n, sizeof(auth_hdr) - n,
             ", opaque=\"%s\"", ac.ac_opaque);
 
-    fprintf(stderr, "[glue] digest: user=%s realm=%s uri=%s resp=%s\n",
-            ctx->user, realm, to_uri, hexresp);
-
     su_home_deinit(home);  /* ac.* pointers are invalid after this */
 
     /* New handle + fresh SDP port, re-send INVITE with credentials */
@@ -272,7 +262,7 @@ static void invite_with_digest(SofiaCtx *ctx, sip_t const *sip, int status)
 
     ctx->local_rtp_port = get_free_udp_port();
     char sdp[512];
-    build_audio_sdp(ctx, sdp, sizeof(sdp));
+    build_audio_sdp(ctx, sdp, sizeof(sdp), "sendrecv");
 
     if (status == 401)
         nua_invite(ctx->call_nh,
@@ -352,15 +342,20 @@ static void nua_cb(nua_event_t event, int status, char const *phrase,
     case nua_r_invite:
         if (status >= 200 && status < 300) {
             nua_ack(nh, TAG_END());
-            extract_rtp_from_sip(ctx, sip);
-            ctx->cb(SOFIA_EV_CALL_CONNECTED, status, phrase, NULL, ctx->userdata);
-            if (ctx->local_rtp_port > 0 && ctx->remote_rtp_port > 0) {
-                char aux[128];
-                snprintf(aux, sizeof(aux), "%d,%s,%d,%d",
-                         ctx->local_rtp_port, ctx->remote_rtp_ip, ctx->remote_rtp_port,
-                         ctx->remote_rtp_payload);
-                ctx->cb(SOFIA_EV_CALL_MEDIA, status, phrase, aux, ctx->userdata);
+            if (!ctx->call_established) {
+                /* Initial INVITE 200 OK — start media. */
+                ctx->call_established = TRUE;
+                extract_rtp_from_sip(ctx, sip);
+                ctx->cb(SOFIA_EV_CALL_CONNECTED, status, phrase, NULL, ctx->userdata);
+                if (ctx->local_rtp_port > 0 && ctx->remote_rtp_port > 0) {
+                    char aux[128];
+                    snprintf(aux, sizeof(aux), "%d,%s,%d,%d",
+                             ctx->local_rtp_port, ctx->remote_rtp_ip, ctx->remote_rtp_port,
+                             ctx->remote_rtp_payload);
+                    ctx->cb(SOFIA_EV_CALL_MEDIA, status, phrase, aux, ctx->userdata);
+                }
             }
+            /* re-INVITE 200 OK (hold/unhold) — already ACK'd, nothing else to do. */
         } else if ((status == 401 || status == 407) && ctx->user && ctx->password) {
             invite_with_digest(ctx, sip, status);
         } else if (status >= 300) {
@@ -374,6 +369,7 @@ static void nua_cb(nua_event_t event, int status, char const *phrase,
         ctx->cb(SOFIA_EV_CALL_ENDED, status, phrase, NULL, ctx->userdata);
         ctx->local_rtp_port = 0; ctx->remote_rtp_port = 0;
         ctx->remote_rtp_ip[0] = '\0'; ctx->remote_rtp_payload = 0;
+        ctx->call_established = FALSE; ctx->call_on_hold = FALSE;
         if (ctx->call_nh == nh) { nua_handle_unref(ctx->call_nh); ctx->call_nh = NULL; }
         break;
 
@@ -381,6 +377,7 @@ static void nua_cb(nua_event_t event, int status, char const *phrase,
         ctx->cb(SOFIA_EV_CALL_ENDED, status, "Cancelled", NULL, ctx->userdata);
         ctx->local_rtp_port = 0; ctx->remote_rtp_port = 0;
         ctx->remote_rtp_ip[0] = '\0'; ctx->remote_rtp_payload = 0;
+        ctx->call_established = FALSE; ctx->call_on_hold = FALSE;
         if (ctx->call_nh == nh) { nua_handle_unref(ctx->call_nh); ctx->call_nh = NULL; }
         break;
 
@@ -527,11 +524,13 @@ void sofia_unregister(SofiaCtx *ctx) {
 void sofia_call(SofiaCtx *ctx, const char *number) {
     if (!ctx->server || !ctx->user) return;
 
-    ctx->call_auth_tried = FALSE;
-    ctx->local_rtp_port  = get_free_udp_port();
+    ctx->call_auth_tried  = FALSE;
+    ctx->call_established = FALSE;
+    ctx->call_on_hold     = FALSE;
+    ctx->local_rtp_port   = get_free_udp_port();
 
     char sdp[512];
-    build_audio_sdp(ctx, sdp, sizeof(sdp));
+    build_audio_sdp(ctx, sdp, sizeof(sdp), "sendrecv");
 
     char to[512], from[512];
     if (strncmp(number, "sip:", 4) == 0 || strncmp(number, "sips:", 5) == 0)
@@ -542,8 +541,6 @@ void sofia_call(SofiaCtx *ctx, const char *number) {
 
     free(ctx->call_to);
     ctx->call_to = strdup(to);   /* saved for use by invite_with_digest */
-
-    fprintf(stderr, "[glue] sofia_call to=%s from=%s sdp:\n%s\n", to, from, sdp);
 
     if (ctx->call_nh) { nua_handle_unref(ctx->call_nh); ctx->call_nh = NULL; }
     ctx->call_nh = nua_handle(ctx->nua, NULL,
@@ -559,15 +556,17 @@ void sofia_call(SofiaCtx *ctx, const char *number) {
 void sofia_answer(SofiaCtx *ctx) {
     if (!ctx->call_nh) return;
 
+    ctx->call_on_hold   = FALSE;
     ctx->local_rtp_port = get_free_udp_port();
     char sdp[512];
-    build_audio_sdp(ctx, sdp, sizeof(sdp));
+    build_audio_sdp(ctx, sdp, sizeof(sdp), "sendrecv");
 
     nua_respond(ctx->call_nh, SIP_200_OK,
                 SIPTAG_CONTENT_TYPE_STR("application/sdp"),
                 SIPTAG_PAYLOAD_STR(sdp),
                 TAG_END());
 
+    ctx->call_established = TRUE;
     ctx->cb(SOFIA_EV_CALL_CONNECTED, 200, "OK", NULL, ctx->userdata);
 
     if (ctx->remote_rtp_port > 0) {
@@ -581,6 +580,18 @@ void sofia_answer(SofiaCtx *ctx) {
 
 void sofia_hangup(SofiaCtx *ctx) {
     if (ctx->call_nh) nua_bye(ctx->call_nh, TAG_END());
+}
+
+void sofia_set_hold(SofiaCtx *ctx, int hold) {
+    if (!ctx->call_nh || !ctx->call_established) return;
+    ctx->call_on_hold = hold ? TRUE : FALSE;
+    char sdp[512];
+    build_audio_sdp(ctx, sdp, sizeof(sdp),
+                    hold ? "sendonly" : "sendrecv");
+    nua_invite(ctx->call_nh,
+               SIPTAG_CONTENT_TYPE_STR("application/sdp"),
+               SIPTAG_PAYLOAD_STR(sdp),
+               TAG_END());
 }
 
 void sofia_send_dtmf(SofiaCtx *ctx, char digit) {

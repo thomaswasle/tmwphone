@@ -103,7 +103,7 @@ impl AudioSession {
 
         // ── Send pipeline ────────────────────────────────────────────────────
 
-        let audio_in  = make("pulsesrc")?;
+        let audio_in  = make("autoaudiosrc")?;
         let aconv_s   = make("audioconvert")?;
         let aresamp   = make("audioresample")?;
 
@@ -171,6 +171,11 @@ impl AudioSession {
             .map_err(|e| format!("recv PLAY: {e:?}"))?;
 
         Ok(AudioSession { send, recv })
+    }
+
+    pub fn set_hold(&self, hold: bool) {
+        let state = if hold { gst::State::Paused } else { gst::State::Playing };
+        let _ = self.send.set_state(state);
     }
 }
 

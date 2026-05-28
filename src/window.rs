@@ -136,6 +136,9 @@ mod imp {
                         if let Some(engine) = obj.imp().sip_engine.borrow().as_ref() {
                             engine.set_hold(hold);
                         }
+                        if let Some(session) = obj.imp().audio_session.borrow().as_ref() {
+                            session.set_hold(hold);
+                        }
                         None
                     }
                 ),
@@ -297,16 +300,11 @@ mod imp {
                 return;
             }
 
-            let (engine, rx) = SipEngine::new(&host, port);
             let obj = self.obj();
             let obj_weak = obj.downgrade();
-            glib::MainContext::default().spawn_local(async move {
-                while let Ok(event) = rx.recv().await {
-                    if let Some(obj) = obj_weak.upgrade() {
-                        obj.imp().handle_sip_event(event);
-                    } else {
-                        break;
-                    }
+            let engine = SipEngine::new(&host, port, move |event| {
+                if let Some(obj) = obj_weak.upgrade() {
+                    obj.imp().handle_sip_event(event);
                 }
             });
 

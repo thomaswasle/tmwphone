@@ -1,0 +1,15 @@
+[source.crates-io]
+replace-with = "dh-cargo-registry"
+
+[source.dh-cargo-registry]
+directory = "/home/tmuwa/git/locaclient/debian/cargo_registry"
+
+[unstable]
+sbom = false
+
+[build]
+rustflags = ['-C', 'debuginfo=2', '-C', 'strip=none', '--cap-lints', 'warn', '-C', 'linker=x86_64-linux-gnu-gcc', '-C', 'link-arg=-Wl,-Bsymbolic-functions', '-C', 'link-arg=-Wl,--package-metadata=%7B%22type%22:%22deb%22%2C%22os%22:%22ubuntu%22%2C%22name%22:%22locaclient%22%2C%22version%22:%220.1.0-1%22%2C%22architecture%22:%22amd64%22%7D', '-C', 'link-arg=-flto=auto', '-C', 'link-arg=-ffat-lto-objects', '-C', 'link-arg=-Wl,-z,relro', '--remap-path-prefix', '/home/tmuwa/git/locaclient=/usr/share/cargo/registry/locaclient-0.1.0', '--remap-path-prefix', '/home/tmuwa/git/locaclient/debian/cargo_registry=/usr/share/cargo/registry', '-Cforce-frame-pointers=yes']
+sbom = false
+
+[profile.release]
+debug = true
