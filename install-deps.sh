@@ -12,7 +12,8 @@ sudo apt-get install -y \
     libsofia-sip-ua-dev \
     libsofia-sip-ua-glib-dev \
     libgstreamer1.0-dev \
-    libgstreamer-plugins-base1.0-dev
+    libgstreamer-plugins-base1.0-dev \
+    libsecret-1-dev
 
 # Install Rust if not present
 if ! command -v cargo &>/dev/null; then

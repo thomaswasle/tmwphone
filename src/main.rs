@@ -1,6 +1,7 @@
 mod application;
 mod audio;
 mod config;
+mod keyring;
 mod sip;
 mod widgets;
 mod window;

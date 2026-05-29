@@ -322,7 +322,7 @@ mod imp {
             engine.register(crate::sip::SipConfig {
                 server: host,
                 username: settings.string("sip-username").into(),
-                password: settings.string("sip-password").into(),
+                password: crate::keyring::load().unwrap_or_default(),
                 display_name: settings.string("sip-display-name").into(),
                 port,
             });

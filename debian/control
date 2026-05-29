@@ -13,6 +13,7 @@ Build-Depends: debhelper-compat (= 13),
                libglib2.0-bin,
                libgstreamer1.0-dev,
                libgstreamer-plugins-base1.0-dev,
+               libsecret-1-dev,
                pkg-config
 Standards-Version: 4.7.0
 Rules-Requires-Root: no

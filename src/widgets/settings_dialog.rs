@@ -53,9 +53,10 @@ mod imp {
                 .set_text(&settings.string("sip-display-name"));
             self.username_row
                 .set_text(&settings.string("sip-username"));
-            self.password_row
-                .set_text(&settings.string("sip-password"));
             self.server_row.set_text(&settings.string("sip-server"));
+            if let Some(pwd) = crate::keyring::load() {
+                self.password_row.set_text(&pwd);
+            }
 
             let obj = self.obj();
             self.connect_row.connect_activated(glib::clone!(
@@ -80,11 +81,11 @@ mod imp {
                 .set_string("sip-username", &self.username_row.text())
                 .unwrap();
             settings
-                .set_string("sip-password", &self.password_row.text())
-                .unwrap();
-            settings
                 .set_string("sip-server", &self.server_row.text())
                 .unwrap();
+            if let Err(e) = crate::keyring::save(&self.password_row.text()) {
+                log::warn!("keyring save failed: {e}");
+            }
 
             self.obj().emit_by_name::<()>("connect-requested", &[]);
             self.obj().close();
