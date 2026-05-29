@@ -47,6 +47,10 @@ void sofia_register(SofiaCtx   *ctx,
 /* Send REGISTER with Expires: 0 (unregister). */
 void sofia_unregister(SofiaCtx *ctx);
 
+/* Force an immediate registration refresh (re-sends REGISTER on the existing
+   handle without tearing down the SIP stack). Safe to call while on a call. */
+void sofia_reregister(SofiaCtx *ctx);
+
 /* Initiate outgoing call.  number may be a bare extension or sip: URI. */
 void sofia_call(SofiaCtx *ctx, const char *number);
 

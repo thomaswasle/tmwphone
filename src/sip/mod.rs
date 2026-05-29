@@ -119,6 +119,11 @@ impl SipEngine {
         unsafe { ffi::sofia_unregister(self.ctx) }
     }
 
+    pub fn reregister(&self) {
+        if self.ctx.is_null() { return; }
+        unsafe { ffi::sofia_reregister(self.ctx) }
+    }
+
     pub fn make_call(&self, number: &str) {
         let s = CString::new(number).unwrap();
         unsafe { ffi::sofia_call(self.ctx, s.as_ptr()) }

@@ -31,6 +31,8 @@ mod imp {
         pub consult_session: RefCell<Option<AudioSession>>,
         /// Name/number of the primary caller, used for the "Holding: …" label.
         pub primary_caller: RefCell<String>,
+        /// Periodic registration keepalive timer (re-sends REGISTER every 2 minutes).
+        pub keepalive_timer: RefCell<Option<glib::SourceId>>,
     }
 
     #[glib::object_subclass]
@@ -240,12 +242,7 @@ mod imp {
                 obj,
                 move |banner| {
                     match banner.button_label().as_deref() {
-                        Some("Copy") => {
-                            if let Some(display) = banner.display().downcast::<gtk4::gdk::Display>().ok() {
-                                display.clipboard().set_text(banner.title().as_str());
-                            }
-                        }
-                        Some("Connect") => {
+                        Some("Connect") | Some("Reconnect") => {
                             obj.imp().on_connect_requested();
                         }
                         _ => {
@@ -255,12 +252,12 @@ mod imp {
                 }
             ));
 
-            // Show "Connect" if credentials are already saved, otherwise prompt to configure.
+            // Auto-connect if credentials are already saved; otherwise prompt to configure.
             let settings = gio::Settings::new("net.loca.TMWPhone");
             let has_credentials = !settings.string("sip-username").is_empty()
                 && !settings.string("sip-server").is_empty();
             if has_credentials {
-                self.status_banner.set_button_label(Some("Connect"));
+                self.on_connect_requested();
             } else {
                 self.status_banner.set_title("Not registered — tap Configure");
             }
@@ -287,7 +284,7 @@ mod imp {
                 SipEvent::RegistrationFailed(reason) => {
                     self.status_banner
                         .set_title(&format!("Registration failed: {reason}"));
-                    self.status_banner.set_button_label(Some("Copy"));
+                    self.status_banner.set_button_label(Some("Reconnect"));
                     self.status_banner.set_revealed(true);
                 }
                 SipEvent::IncomingCall { from } => {
@@ -320,38 +317,23 @@ mod imp {
                 SipEvent::CallEnded => {
                     *self.audio_session.borrow_mut() = None;
                     *self.consult_session.borrow_mut() = None;
-                    let incoming_pending = self.call_screen.get()
-                        .map(|cs| cs.imp().answer_button.is_visible())
-                        .unwrap_or(false);
-                    if !incoming_pending {
-                        if let Some(cs) = self.call_screen.get() { cs.stop_timer(); }
-                        self.show_call_screen(false);
-                        if let Some(dialpad) = self.dialpad.get() { dialpad.clear(); }
-                    }
+                    if let Some(cs) = self.call_screen.get() { cs.stop_timer(); }
+                    self.show_call_screen(false);
+                    if let Some(dialpad) = self.dialpad.get() { dialpad.clear(); }
                 }
                 SipEvent::CallFailed(reason) => {
                     *self.audio_session.borrow_mut() = None;
                     *self.consult_session.borrow_mut() = None;
-                    let incoming_pending = self.call_screen.get()
-                        .map(|cs| cs.imp().answer_button.is_visible())
-                        .unwrap_or(false);
-                    if !incoming_pending {
-                        if let Some(cs) = self.call_screen.get() { cs.stop_timer(); }
-                        self.show_call_screen(false);
-                    }
+                    if let Some(cs) = self.call_screen.get() { cs.stop_timer(); }
+                    self.show_call_screen(false);
                     self.toast_overlay
                         .add_toast(error_toast(&format!("Call failed: {reason}")));
                 }
                 SipEvent::TransferOk => {
                     *self.audio_session.borrow_mut() = None;
                     *self.consult_session.borrow_mut() = None;
-                    let incoming_pending = self.call_screen.get()
-                        .map(|cs| cs.imp().answer_button.is_visible())
-                        .unwrap_or(false);
-                    if !incoming_pending {
-                        if let Some(cs) = self.call_screen.get() { cs.stop_timer(); }
-                        self.show_call_screen(false);
-                    }
+                    if let Some(cs) = self.call_screen.get() { cs.stop_timer(); }
+                    self.show_call_screen(false);
                     let toast = adw::Toast::new("Call transferred successfully");
                     toast.set_timeout(4);
                     self.toast_overlay.add_toast(toast);
@@ -459,6 +441,25 @@ mod imp {
             self.status_banner.set_revealed(true);
 
             *self.sip_engine.borrow_mut() = Some(engine);
+
+            // Cancel any previous keepalive timer and start a new one.
+            // Re-sends REGISTER every 2 minutes so the registration never
+            // silently expires if sofia's own refresh mechanism fails.
+            if let Some(id) = self.keepalive_timer.borrow_mut().take() {
+                id.remove();
+            }
+            let obj_weak = self.obj().downgrade();
+            let id = glib::timeout_add_seconds_local(120, move || {
+                if let Some(obj) = obj_weak.upgrade() {
+                    if let Some(engine) = obj.imp().sip_engine.borrow().as_ref() {
+                        engine.reregister();
+                    }
+                    glib::ControlFlow::Continue
+                } else {
+                    glib::ControlFlow::Break
+                }
+            });
+            *self.keepalive_timer.borrow_mut() = Some(id);
         }
     }
 }

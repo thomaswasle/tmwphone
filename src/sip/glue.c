@@ -431,6 +431,23 @@ static void nua_cb(nua_event_t event, int status, char const *phrase,
         break;
 
     case nua_i_invite: {
+        /* Re-INVITE on an established call (remote-initiated hold or
+           codec renegotiation).  Respond with 200 OK and current SDP;
+           do NOT fire SOFIA_EV_INCOMING_CALL or reset call state. */
+        if (ctx->call_established && ctx->call_nh == nh) {
+            extract_rtp_into(ctx, sip,
+                             ctx->remote_rtp_ip, sizeof(ctx->remote_rtp_ip),
+                             &ctx->remote_rtp_port, &ctx->remote_rtp_payload);
+            char sdp[512];
+            build_audio_sdp(ctx, sdp, sizeof(sdp), "sendrecv", ctx->local_rtp_port);
+            nua_respond(ctx->call_nh, SIP_200_OK,
+                        SIPTAG_CONTENT_TYPE_STR("application/sdp"),
+                        SIPTAG_PAYLOAD_STR(sdp),
+                        TAG_END());
+            break;
+        }
+
+        /* New incoming call */
         if (ctx->call_nh && ctx->call_nh != nh) nua_handle_unref(ctx->call_nh);
         ctx->call_nh = nua_handle_ref(nh);
 
@@ -456,6 +473,11 @@ static void nua_cb(nua_event_t event, int status, char const *phrase,
             else
                 snprintf(from_buf, sizeof(from_buf), "%s@%s", u, h);
         }
+
+        /* Send 180 Ringing so the remote party knows we received the INVITE
+           and stops retransmitting while the user decides to answer. */
+        nua_respond(nh, SIP_180_RINGING, TAG_END());
+
         ctx->cb(SOFIA_EV_INCOMING_CALL, status, phrase,
                 from_buf[0] ? from_buf : "Unknown", ctx->userdata);
         break;
@@ -743,6 +765,13 @@ void sofia_register(SofiaCtx   *ctx,
 
 void sofia_unregister(SofiaCtx *ctx) {
     if (ctx->reg_nh) nua_unregister(ctx->reg_nh, TAG_END());
+}
+
+void sofia_reregister(SofiaCtx *ctx) {
+    if (!ctx->reg_nh) return;
+    /* Re-send REGISTER on the existing handle. Sofia reuses the previously
+       negotiated registrar and credentials stored via nua_set_params. */
+    nua_register(ctx->reg_nh, TAG_END());
 }
 
 void sofia_call(SofiaCtx *ctx, const char *number) {
