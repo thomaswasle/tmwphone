@@ -7,8 +7,15 @@
 #define SOFIA_EV_CALL_CONNECTED 4
 #define SOFIA_EV_CALL_ENDED     5
 #define SOFIA_EV_CALL_FAILED    6
-/* aux = "local_rtp_port,remote_ip,remote_rtp_port"  e.g. "12345,10.1.2.3,20000" */
+/* aux = "local_rtp_port,remote_ip,remote_rtp_port,payload"  e.g. "12345,10.1.2.3,20000,0" */
 #define SOFIA_EV_CALL_MEDIA     7
+
+#define SOFIA_EV_TRANSFER_OK       8   /* blind transfer accepted */
+#define SOFIA_EV_TRANSFER_FAILED   9   /* blind transfer rejected */
+#define SOFIA_EV_CONSULT_RINGING  10   /* consultation call ringing */
+#define SOFIA_EV_CONSULT_CONNECTED 11  /* consultation call answered */
+#define SOFIA_EV_CONSULT_MEDIA    12   /* aux = "local_port,remote_ip,remote_port,payload" */
+#define SOFIA_EV_CONSULT_ENDED    13   /* consultation call ended/cancelled */
 
 typedef void (*sofia_event_cb_t)(
     int         event,      /* SOFIA_EV_* */
@@ -56,3 +63,15 @@ void sofia_set_hold(SofiaCtx *ctx, int hold);
 /* Send a DTMF digit over the current call via SIP INFO (application/dtmf-relay).
    digit must be '0'-'9', '*', or '#'. */
 void sofia_send_dtmf(SofiaCtx *ctx, char digit);
+
+/* Blind-transfer the current call to number via SIP REFER. */
+void sofia_blind_transfer(SofiaCtx *ctx, const char *number);
+
+/* Put current call on hold and dial number as a consultation call. */
+void sofia_start_consultation(SofiaCtx *ctx, const char *number);
+
+/* Transfer the held call to the consultation party (REFER), then end consultation. */
+void sofia_complete_transfer(SofiaCtx *ctx);
+
+/* Cancel consultation: hang up consult call and resume held primary call. */
+void sofia_cancel_consultation(SofiaCtx *ctx);

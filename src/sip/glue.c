@@ -42,6 +42,23 @@ struct SofiaCtx {
     gboolean          call_on_hold;
     gboolean          shutting_down;
     gboolean          shutdown_done;
+
+    /* Consultation call fields */
+    nua_handle_t     *consult_nh;
+    char             *consult_to;          /* SIP URI of consultation party */
+    int               consult_local_rtp_port;
+    char              consult_remote_ip[64];
+    int               consult_remote_port;
+    int               consult_remote_payload;
+    gboolean          consult_established;
+    gboolean          consult_auth_tried;
+    gboolean          consult_ended; /* CONSULT_ENDED already fired; suppress duplicate */
+
+    /* Dialog identifiers captured from the consultation 200 OK, used to build
+       the Replaces header in the attended-transfer Refer-To URI. */
+    char             *consult_call_id;
+    char             *consult_from_tag; /* our tag (From) in the consult dialog */
+    char             *consult_to_tag;   /* 886's tag (To) in the consult dialog */
 };
 
 /* ── Local-interface selection ────────────────────────────────────────────── */
@@ -90,8 +107,14 @@ static int get_free_udp_port(void) {
 }
 
 /* Extract the first audio stream's connection address, port, and selected
-   payload type from the SDP body of a SIP message. */
-static void extract_rtp_from_sip(SofiaCtx *ctx, sip_t const *sip) {
+   payload type from the SDP body of a SIP message, writing into the
+   provided output buffers. This can be used for both the primary and
+   consultation calls without touching ctx fields directly. */
+static void extract_rtp_into(SofiaCtx *ctx, sip_t const *sip,
+                              char *ip_out, size_t ip_len,
+                              int *port_out, int *payload_out)
+{
+    (void)ctx;
     if (!sip || !sip->sip_payload || !sip->sip_payload->pl_data)
         return;
 
@@ -113,14 +136,14 @@ static void extract_rtp_from_sip(SofiaCtx *ctx, sip_t const *sip) {
             if (m->m_connections && m->m_connections->c_address)
                 m_addr = m->m_connections->c_address;
             if (m_addr)
-                strncpy(ctx->remote_rtp_ip, m_addr, sizeof(ctx->remote_rtp_ip) - 1);
-            ctx->remote_rtp_port = (int)m->m_port;
+                strncpy(ip_out, m_addr, ip_len - 1);
+            *port_out = (int)m->m_port;
 
             /* Pick the first non-telephone-event payload type as the codec. */
-            ctx->remote_rtp_payload = 0; /* default PCMU */
+            *payload_out = 0; /* default PCMU */
             for (sdp_rtpmap_t const *rm = m->m_rtpmaps; rm; rm = rm->rm_next) {
                 if (rm->rm_pt != 101) {
-                    ctx->remote_rtp_payload = (int)rm->rm_pt;
+                    *payload_out = (int)rm->rm_pt;
                     break;
                 }
             }
@@ -132,9 +155,10 @@ static void extract_rtp_from_sip(SofiaCtx *ctx, sip_t const *sip) {
 }
 
 /* Build an SDP offer/answer for ctx->local_ip:port.
-   direction is "sendrecv", "sendonly", or "recvonly". */
+   direction is "sendrecv", "sendonly", or "recvonly".
+   port is the local RTP port to advertise. */
 static void build_audio_sdp(SofiaCtx *ctx, char *buf, size_t len,
-                             const char *direction) {
+                             const char *direction, int port) {
     snprintf(buf, len,
         "v=0\r\n"
         "o=- 0 0 IN IP4 %s\r\n"
@@ -148,7 +172,7 @@ static void build_audio_sdp(SofiaCtx *ctx, char *buf, size_t len,
         "a=fmtp:101 0-15\r\n"
         "a=ptime:20\r\n"
         "a=%s\r\n",
-        ctx->local_ip, ctx->local_ip, ctx->local_rtp_port, direction);
+        ctx->local_ip, ctx->local_ip, port, direction);
 }
 
 /* ── Auth helpers ─────────────────────────────────────────────────────────── */
@@ -262,7 +286,7 @@ static void invite_with_digest(SofiaCtx *ctx, sip_t const *sip, int status)
 
     ctx->local_rtp_port = get_free_udp_port();
     char sdp[512];
-    build_audio_sdp(ctx, sdp, sizeof(sdp), "sendrecv");
+    build_audio_sdp(ctx, sdp, sizeof(sdp), "sendrecv", ctx->local_rtp_port);
 
     if (status == 401)
         nua_invite(ctx->call_nh,
@@ -275,6 +299,95 @@ static void invite_with_digest(SofiaCtx *ctx, sip_t const *sip, int status)
                    SIPTAG_PROXY_AUTHORIZATION_STR(auth_hdr),
                    SIPTAG_CONTENT_TYPE_STR("application/sdp"),
                SIPTAG_PAYLOAD_STR(sdp),
+                   TAG_END());
+}
+
+/* Compute digest response and re-send consultation INVITE with Authorization header.
+   Parallel to invite_with_digest but operates on consult_nh and consult_to. */
+static void consult_with_digest(SofiaCtx *ctx, sip_t const *sip, int status)
+{
+    if (!sip) return;
+
+    /* Only attempt auth once per consultation call. */
+    if (ctx->consult_auth_tried) {
+        ctx->cb(SOFIA_EV_CONSULT_ENDED, status, "Authentication failed", NULL, ctx->userdata);
+        if (ctx->consult_nh) { nua_handle_unref(ctx->consult_nh); ctx->consult_nh = NULL; }
+        return;
+    }
+    ctx->consult_auth_tried = TRUE;
+
+    msg_auth_t const *ch = (status == 401)
+        ? sip->sip_www_authenticate
+        : sip->sip_proxy_authenticate;
+    if (!ch || !ch->au_params) return;
+
+    su_home_t home[1];
+    su_home_init(home);
+
+    auth_challenge_t ac = { sizeof(ac) };
+    auth_digest_challenge_get(home, &ac, ch->au_params);
+
+    const char *realm = ac.ac_realm ? ac.ac_realm : ctx->server;
+    const char *nonce = ac.ac_nonce ? ac.ac_nonce : "";
+
+    const char *to_uri = ctx->consult_to ? ctx->consult_to : "";
+    char to_hdr[520];
+    snprintf(to_hdr, sizeof(to_hdr), "<%s>", to_uri);
+
+    auth_hexmd5_t ha1, hexresp;
+    auth_digest_ha1(ha1, ctx->user, realm, ctx->password);
+
+    auth_response_t ar = { sizeof(ar) };
+    ar.ar_realm  = realm;
+    ar.ar_nonce  = nonce;
+    ar.ar_uri    = to_uri;
+    const char *cnonce = "4b6f63616c20";
+    const char *nc     = "00000001";
+    if (ac.ac_auth) {
+        ar.ar_qop    = "auth";
+        ar.ar_cnonce = cnonce;
+        ar.ar_nc     = nc;
+        ar.ar_auth   = 1;
+    }
+    auth_digest_response(&ar, hexresp, ha1, "INVITE", NULL, 0);
+
+    char auth_hdr[2048];
+    int n = snprintf(auth_hdr, sizeof(auth_hdr),
+        "Digest username=\"%s\", realm=\"%s\", nonce=\"%s\","
+        " uri=\"%s\", response=\"%s\", algorithm=MD5",
+        ctx->user, realm, nonce, to_uri, hexresp);
+    if (ac.ac_auth && n > 0 && n < (int)sizeof(auth_hdr))
+        n += snprintf(auth_hdr + n, sizeof(auth_hdr) - n,
+            ", qop=auth, nc=%s, cnonce=\"%s\"", nc, cnonce);
+    if (ac.ac_opaque && n > 0 && n < (int)sizeof(auth_hdr))
+        snprintf(auth_hdr + n, sizeof(auth_hdr) - n,
+            ", opaque=\"%s\"", ac.ac_opaque);
+
+    su_home_deinit(home);
+
+    char from_hdr[256];
+    snprintf(from_hdr, sizeof(from_hdr), "<sip:%s@%s>", ctx->user, ctx->server);
+    if (ctx->consult_nh) { nua_handle_unref(ctx->consult_nh); ctx->consult_nh = NULL; }
+    ctx->consult_nh = nua_handle(ctx->nua, NULL,
+                                  SIPTAG_FROM_STR(from_hdr),
+                                  SIPTAG_TO_STR(to_hdr),
+                                  TAG_END());
+
+    ctx->consult_local_rtp_port = get_free_udp_port();
+    char sdp[512];
+    build_audio_sdp(ctx, sdp, sizeof(sdp), "sendrecv", ctx->consult_local_rtp_port);
+
+    if (status == 401)
+        nua_invite(ctx->consult_nh,
+                   SIPTAG_AUTHORIZATION_STR(auth_hdr),
+                   SIPTAG_CONTENT_TYPE_STR("application/sdp"),
+                   SIPTAG_PAYLOAD_STR(sdp),
+                   TAG_END());
+    else
+        nua_invite(ctx->consult_nh,
+                   SIPTAG_PROXY_AUTHORIZATION_STR(auth_hdr),
+                   SIPTAG_CONTENT_TYPE_STR("application/sdp"),
+                   SIPTAG_PAYLOAD_STR(sdp),
                    TAG_END());
 }
 
@@ -321,8 +434,17 @@ static void nua_cb(nua_event_t event, int status, char const *phrase,
         if (ctx->call_nh && ctx->call_nh != nh) nua_handle_unref(ctx->call_nh);
         ctx->call_nh = nua_handle_ref(nh);
 
+        /* Reset per-call state so stale flags from a previous call never leak
+           into this new incoming dialog (e.g. call_established = TRUE would
+           cause sofia_set_hold to send a re-INVITE on this handle). */
+        ctx->call_established = FALSE;
+        ctx->call_auth_tried  = FALSE;
+        ctx->call_on_hold     = FALSE;
+
         /* Store caller's SDP offer so sofia_answer() can include it later. */
-        extract_rtp_from_sip(ctx, sip);
+        extract_rtp_into(ctx, sip,
+                         ctx->remote_rtp_ip, sizeof(ctx->remote_rtp_ip),
+                         &ctx->remote_rtp_port, &ctx->remote_rtp_payload);
 
         char from_buf[256] = {0};
         if (sip && sip->sip_from) {
@@ -340,12 +462,57 @@ static void nua_cb(nua_event_t event, int status, char const *phrase,
     }
 
     case nua_r_invite:
+        /* Check for consultation handle FIRST to avoid mishandling consult 200 OKs */
+        if (nh == ctx->consult_nh) {
+            if (status >= 200 && status < 300) {
+                nua_ack(nh, TAG_END());
+                if (!ctx->consult_established) {
+                    ctx->consult_established = TRUE;
+                    extract_rtp_into(ctx, sip,
+                        ctx->consult_remote_ip, sizeof(ctx->consult_remote_ip),
+                        &ctx->consult_remote_port, &ctx->consult_remote_payload);
+
+                    /* Save dialog identifiers for attended-transfer Replaces header. */
+                    free(ctx->consult_call_id);  ctx->consult_call_id  = NULL;
+                    free(ctx->consult_from_tag); ctx->consult_from_tag = NULL;
+                    free(ctx->consult_to_tag);   ctx->consult_to_tag   = NULL;
+                    if (sip && sip->sip_call_id)
+                        ctx->consult_call_id = strdup(sip->sip_call_id->i_id);
+                    if (sip && sip->sip_from && sip->sip_from->a_tag)
+                        ctx->consult_from_tag = strdup(sip->sip_from->a_tag);
+                    if (sip && sip->sip_to && sip->sip_to->a_tag)
+                        ctx->consult_to_tag = strdup(sip->sip_to->a_tag);
+
+                    ctx->cb(SOFIA_EV_CONSULT_CONNECTED, status, phrase, NULL, ctx->userdata);
+                    if (ctx->consult_local_rtp_port > 0 && ctx->consult_remote_port > 0) {
+                        char aux[128];
+                        snprintf(aux, sizeof(aux), "%d,%s,%d,%d",
+                            ctx->consult_local_rtp_port, ctx->consult_remote_ip,
+                            ctx->consult_remote_port, ctx->consult_remote_payload);
+                        ctx->cb(SOFIA_EV_CONSULT_MEDIA, status, phrase, aux, ctx->userdata);
+                    }
+                }
+                /* re-INVITE 200 OK — already ACK'd, nothing else to do. */
+            } else if ((status == 401 || status == 407) && ctx->user && ctx->password) {
+                consult_with_digest(ctx, sip, status);
+            } else if (status >= 300) {
+                if (!ctx->consult_ended)
+                    ctx->cb(SOFIA_EV_CONSULT_ENDED, status, phrase, NULL, ctx->userdata);
+                ctx->consult_ended = FALSE;
+                ctx->consult_established = FALSE;
+                if (ctx->consult_nh) { nua_handle_unref(ctx->consult_nh); ctx->consult_nh = NULL; }
+            }
+            break;
+        }
+        /* Primary call handling */
         if (status >= 200 && status < 300) {
             nua_ack(nh, TAG_END());
             if (!ctx->call_established) {
                 /* Initial INVITE 200 OK — start media. */
                 ctx->call_established = TRUE;
-                extract_rtp_from_sip(ctx, sip);
+                extract_rtp_into(ctx, sip,
+                                 ctx->remote_rtp_ip, sizeof(ctx->remote_rtp_ip),
+                                 &ctx->remote_rtp_port, &ctx->remote_rtp_payload);
                 ctx->cb(SOFIA_EV_CALL_CONNECTED, status, phrase, NULL, ctx->userdata);
                 if (ctx->local_rtp_port > 0 && ctx->remote_rtp_port > 0) {
                     char aux[128];
@@ -366,6 +533,18 @@ static void nua_cb(nua_event_t event, int status, char const *phrase,
 
     case nua_i_bye:
     case nua_r_bye:
+        /* Check consultation handle first */
+        if (nh == ctx->consult_nh) {
+            if (!ctx->consult_ended)
+                ctx->cb(SOFIA_EV_CONSULT_ENDED, status, phrase, NULL, ctx->userdata);
+            ctx->consult_remote_port = 0;
+            ctx->consult_remote_ip[0] = '\0';
+            ctx->consult_established = FALSE;
+            ctx->consult_ended = FALSE;
+            nua_handle_unref(ctx->consult_nh); ctx->consult_nh = NULL;
+            break;
+        }
+        /* Primary call */
         ctx->cb(SOFIA_EV_CALL_ENDED, status, phrase, NULL, ctx->userdata);
         ctx->local_rtp_port = 0; ctx->remote_rtp_port = 0;
         ctx->remote_rtp_ip[0] = '\0'; ctx->remote_rtp_payload = 0;
@@ -374,6 +553,15 @@ static void nua_cb(nua_event_t event, int status, char const *phrase,
         break;
 
     case nua_i_cancel:
+        /* Check consultation handle first */
+        if (nh == ctx->consult_nh) {
+            ctx->cb(SOFIA_EV_CONSULT_ENDED, status, "Cancelled", NULL, ctx->userdata);
+            ctx->consult_remote_port = 0;
+            ctx->consult_remote_ip[0] = '\0';
+            ctx->consult_established = FALSE;
+            nua_handle_unref(ctx->consult_nh); ctx->consult_nh = NULL;
+            break;
+        }
         ctx->cb(SOFIA_EV_CALL_ENDED, status, "Cancelled", NULL, ctx->userdata);
         ctx->local_rtp_port = 0; ctx->remote_rtp_port = 0;
         ctx->remote_rtp_ip[0] = '\0'; ctx->remote_rtp_payload = 0;
@@ -381,12 +569,43 @@ static void nua_cb(nua_event_t event, int status, char const *phrase,
         if (ctx->call_nh == nh) { nua_handle_unref(ctx->call_nh); ctx->call_nh = NULL; }
         break;
 
+    case nua_r_refer:
+        if (status == 202 || (status >= 200 && status < 300)) {
+            /* REFER accepted — wait for NOTIFY to confirm */
+        } else if (status >= 300) {
+            ctx->cb(SOFIA_EV_TRANSFER_FAILED, status, phrase, NULL, ctx->userdata);
+        }
+        break;
+
+    case nua_i_notify:
+        /* Respond 200 to the NOTIFY subscription */
+        nua_respond(nh, SIP_200_OK, TAG_END());
+        if (sip && sip->sip_payload && sip->sip_payload->pl_data) {
+            const char *body = sip->sip_payload->pl_data;
+            if (strstr(body, "SIP/2.0 2"))       /* 2xx = success */
+                ctx->cb(SOFIA_EV_TRANSFER_OK, 200, "Transfer complete", NULL, ctx->userdata);
+            else if (strstr(body, "SIP/2.0 4") || strstr(body, "SIP/2.0 5"))
+                ctx->cb(SOFIA_EV_TRANSFER_FAILED, 400, "Transfer failed", NULL, ctx->userdata);
+        }
+        break;
+
     case nua_r_info:
         /* 200 OK response to our SIP INFO (DTMF) — nothing to do. */
         break;
 
     case nua_i_error:
-        ctx->cb(SOFIA_EV_CALL_FAILED, status, phrase, NULL, ctx->userdata);
+        if (nh == ctx->consult_nh) {
+            if (!ctx->consult_ended)
+                ctx->cb(SOFIA_EV_CONSULT_ENDED, status, phrase, NULL, ctx->userdata);
+            ctx->consult_established = FALSE;
+            ctx->consult_ended = FALSE;
+            nua_handle_unref(ctx->consult_nh); ctx->consult_nh = NULL;
+        } else if (nh == ctx->call_nh) {
+            ctx->cb(SOFIA_EV_CALL_FAILED, status, phrase, NULL, ctx->userdata);
+            nua_handle_unref(ctx->call_nh); ctx->call_nh = NULL;
+        }
+        /* Errors on stale/unknown handles (e.g. NOTIFY response after the
+           dialog was already closed by BYE) are silently discarded. */
         break;
 
     default:
@@ -437,7 +656,7 @@ SofiaCtx *sofia_ctx_create(const char *server, int port,
 
     ctx->nua = nua_create(ctx->root, nua_cb, (nua_magic_t *)ctx,
                           NUTAG_URL(nua_url),
-                          NUTAG_ALLOW("INVITE, ACK, BYE, CANCEL, OPTIONS, NOTIFY, INFO"),
+                          NUTAG_ALLOW("INVITE, ACK, BYE, CANCEL, OPTIONS, NOTIFY, INFO, REFER"),
                           NUTAG_AUTOACK(0),
                           NUTAG_AUTOANSWER(0),
                           NUTAG_MEDIA_ENABLE(0),  /* manage SDP ourselves */
@@ -455,6 +674,7 @@ SofiaCtx *sofia_ctx_create(const char *server, int port,
 void sofia_ctx_destroy(SofiaCtx *ctx) {
     if (!ctx) return;
 
+    if (ctx->consult_nh) { nua_handle_unref(ctx->consult_nh); ctx->consult_nh = NULL; }
     if (ctx->reg_nh)  { nua_handle_unref(ctx->reg_nh);  ctx->reg_nh  = NULL; }
     if (ctx->call_nh) { nua_handle_unref(ctx->call_nh); ctx->call_nh = NULL; }
 
@@ -478,6 +698,10 @@ void sofia_ctx_destroy(SofiaCtx *ctx) {
     free(ctx->server);
     free(ctx->auth_str);
     free(ctx->call_to);
+    free(ctx->consult_to);
+    free(ctx->consult_call_id);
+    free(ctx->consult_from_tag);
+    free(ctx->consult_to_tag);
     free(ctx);
 
     su_deinit();
@@ -530,7 +754,7 @@ void sofia_call(SofiaCtx *ctx, const char *number) {
     ctx->local_rtp_port   = get_free_udp_port();
 
     char sdp[512];
-    build_audio_sdp(ctx, sdp, sizeof(sdp), "sendrecv");
+    build_audio_sdp(ctx, sdp, sizeof(sdp), "sendrecv", ctx->local_rtp_port);
 
     char to[512], from[512];
     if (strncmp(number, "sip:", 4) == 0 || strncmp(number, "sips:", 5) == 0)
@@ -559,7 +783,7 @@ void sofia_answer(SofiaCtx *ctx) {
     ctx->call_on_hold   = FALSE;
     ctx->local_rtp_port = get_free_udp_port();
     char sdp[512];
-    build_audio_sdp(ctx, sdp, sizeof(sdp), "sendrecv");
+    build_audio_sdp(ctx, sdp, sizeof(sdp), "sendrecv", ctx->local_rtp_port);
 
     nua_respond(ctx->call_nh, SIP_200_OK,
                 SIPTAG_CONTENT_TYPE_STR("application/sdp"),
@@ -587,7 +811,7 @@ void sofia_set_hold(SofiaCtx *ctx, int hold) {
     ctx->call_on_hold = hold ? TRUE : FALSE;
     char sdp[512];
     build_audio_sdp(ctx, sdp, sizeof(sdp),
-                    hold ? "sendonly" : "sendrecv");
+                    hold ? "sendonly" : "sendrecv", ctx->local_rtp_port);
     nua_invite(ctx->call_nh,
                SIPTAG_CONTENT_TYPE_STR("application/sdp"),
                SIPTAG_PAYLOAD_STR(sdp),
@@ -602,4 +826,99 @@ void sofia_send_dtmf(SofiaCtx *ctx, char digit) {
              SIPTAG_CONTENT_TYPE_STR("application/dtmf-relay"),
              SIPTAG_PAYLOAD_STR(body),
              TAG_END());
+}
+
+void sofia_blind_transfer(SofiaCtx *ctx, const char *number) {
+    if (!ctx->call_nh || !ctx->call_established) return;
+    char to[512];
+    if (strncmp(number, "sip:", 4) == 0 || strncmp(number, "sips:", 5) == 0)
+        snprintf(to, sizeof(to), "<%s>", number);
+    else
+        snprintf(to, sizeof(to), "<sip:%s@%s>", number, ctx->server);
+    nua_refer(ctx->call_nh, SIPTAG_REFER_TO_STR(to), TAG_END());
+}
+
+void sofia_start_consultation(SofiaCtx *ctx, const char *number) {
+    if (!ctx->call_established) return;
+    /* Put primary call on hold */
+    sofia_set_hold(ctx, 1);
+
+    ctx->consult_established = FALSE;
+    ctx->consult_auth_tried  = FALSE;
+    ctx->consult_local_rtp_port = get_free_udp_port();
+
+    char sdp[512];
+    build_audio_sdp(ctx, sdp, sizeof(sdp), "sendrecv", ctx->consult_local_rtp_port);
+
+    char to[512], from[512];
+    if (strncmp(number, "sip:", 4) == 0 || strncmp(number, "sips:", 5) == 0)
+        snprintf(to, sizeof(to), "%s", number);
+    else
+        snprintf(to, sizeof(to), "sip:%s@%s", number, ctx->server);
+    snprintf(from, sizeof(from), "<sip:%s@%s>", ctx->user, ctx->server);
+
+    free(ctx->consult_to);
+    ctx->consult_to = strdup(to);
+
+    if (ctx->consult_nh) { nua_handle_unref(ctx->consult_nh); ctx->consult_nh = NULL; }
+    ctx->consult_nh = nua_handle(ctx->nua, NULL,
+                                  SIPTAG_FROM_STR(from),
+                                  SIPTAG_TO_STR(to),
+                                  TAG_END());
+    nua_invite(ctx->consult_nh,
+               SIPTAG_CONTENT_TYPE_STR("application/sdp"),
+               SIPTAG_PAYLOAD_STR(sdp),
+               TAG_END());
+}
+
+void sofia_complete_transfer(SofiaCtx *ctx) {
+    if (!ctx->call_nh || !ctx->consult_to) return;
+
+    char refer_to[1024];
+    if (ctx->consult_call_id && ctx->consult_from_tag && ctx->consult_to_tag) {
+        /* Attended transfer: Refer-To includes a Replaces parameter so 886
+           atomically swaps from the consult dialog to a new dialog with 20.
+           Semicolons must be %-encoded inside a SIP URI query component. */
+        char enc_cid[512] = {0};
+        for (const char *p = ctx->consult_call_id; *p; p++) {
+            if      (*p == ';') strncat(enc_cid, "%3B", sizeof(enc_cid) - strlen(enc_cid) - 1);
+            else if (*p == '@') strncat(enc_cid, "%40", sizeof(enc_cid) - strlen(enc_cid) - 1);
+            else { char s[2] = {*p, 0}; strncat(enc_cid, s, sizeof(enc_cid) - strlen(enc_cid) - 1); }
+        }
+        snprintf(refer_to, sizeof(refer_to),
+                 "<%s?Replaces=%s%%3Bfrom-tag%%3D%s%%3Bto-tag%%3D%s>",
+                 ctx->consult_to, enc_cid,
+                 ctx->consult_from_tag, ctx->consult_to_tag);
+    } else {
+        /* No dialog IDs (consult never fully established) — fall back to
+           a plain blind transfer. */
+        snprintf(refer_to, sizeof(refer_to), "<%s>", ctx->consult_to);
+    }
+
+    nua_refer(ctx->call_nh, SIPTAG_REFER_TO_STR(refer_to), TAG_END());
+
+    /* Do NOT BYE consult_nh here.  With Replaces, 886 atomically terminates
+       the consultation leg itself when it accepts the INVITE from 20.  We let
+       nua_i_bye / nua_r_bye on consult_nh clean up once that BYE arrives.
+       Sending BYE here in parallel with REFER causes a race that drops the
+       transferred call immediately. */
+}
+
+void sofia_cancel_consultation(SofiaCtx *ctx) {
+    if (!ctx->consult_nh) return;
+
+    if (ctx->consult_established)
+        nua_bye(ctx->consult_nh, TAG_END());
+    else
+        nua_cancel(ctx->consult_nh, TAG_END());
+
+    /* Keep consult_nh alive so the BYE/487 response callback can identify it
+       and clean up. Set consult_ended so that callback suppresses a duplicate
+       CONSULT_ENDED event. */
+    ctx->consult_ended = TRUE;
+    ctx->consult_established = FALSE;
+
+    /* Resume primary call and notify UI immediately. */
+    sofia_set_hold(ctx, 0);
+    ctx->cb(SOFIA_EV_CONSULT_ENDED, 0, "Cancelled", NULL, ctx->userdata);
 }

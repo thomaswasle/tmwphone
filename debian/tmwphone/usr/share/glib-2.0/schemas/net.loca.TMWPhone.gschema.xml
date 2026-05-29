@@ -12,12 +12,6 @@
       <summary>SIP account username</summary>
     </key>
 
-    <!-- TODO: migrate to libsecret / GNOME Keyring for production -->
-    <key name="sip-password" type="s">
-      <default>''</default>
-      <summary>SIP account password (plaintext — dev only)</summary>
-    </key>
-
     <key name="sip-display-name" type="s">
       <default>''</default>
       <summary>Caller-ID display name</summary>

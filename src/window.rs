@@ -28,6 +28,9 @@ mod imp {
         pub call_screen: OnceCell<CallScreen>,
         pub sip_engine: RefCell<Option<SipEngine>>,
         pub audio_session: RefCell<Option<AudioSession>>,
+        pub consult_session: RefCell<Option<AudioSession>>,
+        /// Name/number of the primary caller, used for the "Holding: …" label.
+        pub primary_caller: RefCell<String>,
     }
 
     #[glib::object_subclass]
@@ -162,6 +165,72 @@ mod imp {
                     }
                 ),
             );
+            call_screen.connect_local(
+                "transfer-blind-requested",
+                false,
+                glib::clone!(
+                    #[weak]
+                    obj,
+                    #[upgrade_or]
+                    None,
+                    move |args| {
+                        let number = args[1].get::<String>().unwrap_or_default();
+                        if let Some(engine) = obj.imp().sip_engine.borrow().as_ref() {
+                            engine.blind_transfer(&number);
+                        }
+                        None
+                    }
+                ),
+            );
+            call_screen.connect_local(
+                "consult-requested",
+                false,
+                glib::clone!(
+                    #[weak]
+                    obj,
+                    #[upgrade_or]
+                    None,
+                    move |args| {
+                        let number = args[1].get::<String>().unwrap_or_default();
+                        if let Some(engine) = obj.imp().sip_engine.borrow().as_ref() {
+                            engine.start_consultation(&number);
+                        }
+                        None
+                    }
+                ),
+            );
+            call_screen.connect_local(
+                "transfer-complete-requested",
+                false,
+                glib::clone!(
+                    #[weak]
+                    obj,
+                    #[upgrade_or]
+                    None,
+                    move |_| {
+                        if let Some(engine) = obj.imp().sip_engine.borrow().as_ref() {
+                            engine.complete_transfer();
+                        }
+                        None
+                    }
+                ),
+            );
+            call_screen.connect_local(
+                "consult-cancel-requested",
+                false,
+                glib::clone!(
+                    #[weak]
+                    obj,
+                    #[upgrade_or]
+                    None,
+                    move |_| {
+                        if let Some(engine) = obj.imp().sip_engine.borrow().as_ref() {
+                            engine.cancel_consultation();
+                        }
+                        None
+                    }
+                ),
+            );
             self.call_screen.set(call_screen).unwrap();
 
             // Banner button: "Connect" connects directly, "Configure" opens settings,
@@ -222,6 +291,7 @@ mod imp {
                     self.status_banner.set_revealed(true);
                 }
                 SipEvent::IncomingCall { from } => {
+                    *self.primary_caller.borrow_mut() = from.clone();
                     if let Some(cs) = self.call_screen.get() {
                         cs.set_caller(&from);
                         cs.set_duration("Incoming call…");
@@ -249,18 +319,74 @@ mod imp {
                 }
                 SipEvent::CallEnded => {
                     *self.audio_session.borrow_mut() = None;
-                    if let Some(cs) = self.call_screen.get() { cs.stop_timer(); }
-                    self.show_call_screen(false);
-                    if let Some(dialpad) = self.dialpad.get() {
-                        dialpad.clear();
+                    *self.consult_session.borrow_mut() = None;
+                    let incoming_pending = self.call_screen.get()
+                        .map(|cs| cs.imp().answer_button.is_visible())
+                        .unwrap_or(false);
+                    if !incoming_pending {
+                        if let Some(cs) = self.call_screen.get() { cs.stop_timer(); }
+                        self.show_call_screen(false);
+                        if let Some(dialpad) = self.dialpad.get() { dialpad.clear(); }
                     }
                 }
                 SipEvent::CallFailed(reason) => {
                     *self.audio_session.borrow_mut() = None;
-                    if let Some(cs) = self.call_screen.get() { cs.stop_timer(); }
-                    self.show_call_screen(false);
+                    *self.consult_session.borrow_mut() = None;
+                    let incoming_pending = self.call_screen.get()
+                        .map(|cs| cs.imp().answer_button.is_visible())
+                        .unwrap_or(false);
+                    if !incoming_pending {
+                        if let Some(cs) = self.call_screen.get() { cs.stop_timer(); }
+                        self.show_call_screen(false);
+                    }
                     self.toast_overlay
                         .add_toast(error_toast(&format!("Call failed: {reason}")));
+                }
+                SipEvent::TransferOk => {
+                    *self.audio_session.borrow_mut() = None;
+                    *self.consult_session.borrow_mut() = None;
+                    let incoming_pending = self.call_screen.get()
+                        .map(|cs| cs.imp().answer_button.is_visible())
+                        .unwrap_or(false);
+                    if !incoming_pending {
+                        if let Some(cs) = self.call_screen.get() { cs.stop_timer(); }
+                        self.show_call_screen(false);
+                    }
+                    let toast = adw::Toast::new("Call transferred successfully");
+                    toast.set_timeout(4);
+                    self.toast_overlay.add_toast(toast);
+                }
+                SipEvent::TransferFailed(reason) => {
+                    self.toast_overlay
+                        .add_toast(error_toast(&format!("Transfer failed: {reason}")));
+                }
+                SipEvent::ConsultConnected => {
+                    let held_name = self.primary_caller.borrow().clone();
+                    if let Some(cs) = self.call_screen.get() {
+                        cs.enter_consult_mode(&held_name);
+                    }
+                }
+                SipEvent::ConsultMedia { local_rtp_port, remote_ip, remote_rtp_port, codec } => {
+                    match AudioSession::start(local_rtp_port, &remote_ip, remote_rtp_port, codec) {
+                        Ok(session) => {
+                            *self.consult_session.borrow_mut() = Some(session);
+                        }
+                        Err(e) => {
+                            log::error!("consult audio start failed: {e}");
+                            self.toast_overlay
+                                .add_toast(error_toast(&format!("Consult audio failed: {e}")));
+                        }
+                    }
+                }
+                SipEvent::ConsultEnded => {
+                    *self.consult_session.borrow_mut() = None;
+                    if let Some(cs) = self.call_screen.get() {
+                        cs.exit_consult_mode();
+                    }
+                    // Resume primary audio (C layer already sent re-INVITE with sendrecv).
+                    if let Some(session) = self.audio_session.borrow().as_ref() {
+                        session.set_hold(false);
+                    }
                 }
             }
         }
@@ -272,6 +398,7 @@ mod imp {
 
         pub fn start_call(&self, number: &str) {
             if let Some(engine) = self.sip_engine.borrow().as_ref() {
+                *self.primary_caller.borrow_mut() = number.to_owned();
                 if let Some(cs) = self.call_screen.get() {
                     cs.set_caller(number);
                     cs.set_duration("Calling…");

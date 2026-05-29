@@ -16,6 +16,11 @@ pub enum SipEvent {
     CallMedia { local_rtp_port: u16, remote_ip: String, remote_rtp_port: u16, codec: u8 },
     CallEnded,
     CallFailed(String),
+    TransferOk,
+    TransferFailed(String),
+    ConsultConnected,
+    ConsultMedia { local_rtp_port: u16, remote_ip: String, remote_rtp_port: u16, codec: u8 },
+    ConsultEnded,
 }
 
 // ── Config passed to register() ───────────────────────────────────────────────
@@ -143,6 +148,28 @@ impl SipEngine {
             unsafe { ffi::sofia_send_dtmf(self.ctx, c as std::ffi::c_char) }
         }
     }
+
+    pub fn blind_transfer(&self, number: &str) {
+        if self.ctx.is_null() { return; }
+        let s = CString::new(number).unwrap();
+        unsafe { ffi::sofia_blind_transfer(self.ctx, s.as_ptr()) }
+    }
+
+    pub fn start_consultation(&self, number: &str) {
+        if self.ctx.is_null() { return; }
+        let s = CString::new(number).unwrap();
+        unsafe { ffi::sofia_start_consultation(self.ctx, s.as_ptr()) }
+    }
+
+    pub fn complete_transfer(&self) {
+        if self.ctx.is_null() { return; }
+        unsafe { ffi::sofia_complete_transfer(self.ctx) }
+    }
+
+    pub fn cancel_consultation(&self) {
+        if self.ctx.is_null() { return; }
+        unsafe { ffi::sofia_cancel_consultation(self.ctx) }
+    }
 }
 
 // ── C callback (always fires on the GTK main thread) ─────────────────────────
@@ -164,6 +191,24 @@ unsafe extern "C" fn sofia_event_cb(
         }
     };
 
+    let parse_media_aux = |aux: *const c_char| -> Option<(u16, String, u16, u8)> {
+        let s = if aux.is_null() {
+            String::new()
+        } else {
+            CStr::from_ptr(aux).to_string_lossy().into_owned()
+        };
+        let parts: Vec<&str> = s.splitn(4, ',').collect();
+        if parts.len() >= 3 {
+            let local_rtp_port = parts[0].parse::<u16>().unwrap_or(0);
+            let remote_ip = parts[1].to_string();
+            let remote_rtp_port = parts[2].parse::<u16>().unwrap_or(0);
+            let codec = if parts.len() >= 4 { parts[3].parse::<u8>().unwrap_or(0) } else { 0 };
+            Some((local_rtp_port, remote_ip, remote_rtp_port, codec))
+        } else {
+            None
+        }
+    };
+
     let ev = match event {
         ffi::SOFIA_EV_REGISTER_OK => Some(SipEvent::Registered),
         ffi::SOFIA_EV_REGISTER_FAIL => Some(SipEvent::RegistrationFailed(format!(
@@ -179,18 +224,7 @@ unsafe extern "C" fn sofia_event_cb(
         }
         ffi::SOFIA_EV_CALL_CONNECTED => Some(SipEvent::CallConnected),
         ffi::SOFIA_EV_CALL_MEDIA => {
-            // aux = "local_port,remote_ip,remote_port,payload_type"
-            let s = if aux.is_null() {
-                String::new()
-            } else {
-                CStr::from_ptr(aux).to_string_lossy().into_owned()
-            };
-            let parts: Vec<&str> = s.splitn(4, ',').collect();
-            if parts.len() >= 3 {
-                let local_rtp_port = parts[0].parse::<u16>().unwrap_or(0);
-                let remote_ip = parts[1].to_string();
-                let remote_rtp_port = parts[2].parse::<u16>().unwrap_or(0);
-                let codec = if parts.len() >= 4 { parts[3].parse::<u8>().unwrap_or(0) } else { 0 };
+            if let Some((local_rtp_port, remote_ip, remote_rtp_port, codec)) = parse_media_aux(aux) {
                 Some(SipEvent::CallMedia { local_rtp_port, remote_ip, remote_rtp_port, codec })
             } else {
                 None
@@ -200,6 +234,17 @@ unsafe extern "C" fn sofia_event_cb(
         ffi::SOFIA_EV_CALL_FAILED => Some(SipEvent::CallFailed(format!(
             "{status} {}", phrase_str()
         ))),
+        ffi::SOFIA_EV_TRANSFER_OK => Some(SipEvent::TransferOk),
+        ffi::SOFIA_EV_TRANSFER_FAILED => Some(SipEvent::TransferFailed(phrase_str())),
+        ffi::SOFIA_EV_CONSULT_CONNECTED => Some(SipEvent::ConsultConnected),
+        ffi::SOFIA_EV_CONSULT_MEDIA => {
+            if let Some((local_rtp_port, remote_ip, remote_rtp_port, codec)) = parse_media_aux(aux) {
+                Some(SipEvent::ConsultMedia { local_rtp_port, remote_ip, remote_rtp_port, codec })
+            } else {
+                None
+            }
+        }
+        ffi::SOFIA_EV_CONSULT_ENDED => Some(SipEvent::ConsultEnded),
         _ => None,
     };
 

@@ -7,6 +7,12 @@ pub const SOFIA_EV_CALL_CONNECTED: c_int = 4;
 pub const SOFIA_EV_CALL_ENDED: c_int = 5;
 pub const SOFIA_EV_CALL_FAILED: c_int = 6;
 pub const SOFIA_EV_CALL_MEDIA: c_int = 7;
+pub const SOFIA_EV_TRANSFER_OK: c_int = 8;
+pub const SOFIA_EV_TRANSFER_FAILED: c_int = 9;
+pub const SOFIA_EV_CONSULT_RINGING: c_int = 10;
+pub const SOFIA_EV_CONSULT_CONNECTED: c_int = 11;
+pub const SOFIA_EV_CONSULT_MEDIA: c_int = 12;
+pub const SOFIA_EV_CONSULT_ENDED: c_int = 13;
 
 pub type SofiaEventCb = unsafe extern "C" fn(
     event: c_int,
@@ -43,4 +49,8 @@ extern "C" {
     pub fn sofia_hangup(ctx: *mut SofiaCtx);
     pub fn sofia_set_hold(ctx: *mut SofiaCtx, hold: c_int);
     pub fn sofia_send_dtmf(ctx: *mut SofiaCtx, digit: c_char);
+    pub fn sofia_blind_transfer(ctx: *mut SofiaCtx, number: *const c_char);
+    pub fn sofia_start_consultation(ctx: *mut SofiaCtx, number: *const c_char);
+    pub fn sofia_complete_transfer(ctx: *mut SofiaCtx);
+    pub fn sofia_cancel_consultation(ctx: *mut SofiaCtx);
 }

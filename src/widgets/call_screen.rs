@@ -17,6 +17,8 @@ mod imp {
         #[template_child]
         pub duration_label: TemplateChild<gtk4::Label>,
         #[template_child]
+        pub held_label: TemplateChild<gtk4::Label>,
+        #[template_child]
         pub mute_button: TemplateChild<gtk4::ToggleButton>,
         #[template_child]
         pub hold_button: TemplateChild<gtk4::ToggleButton>,
@@ -24,6 +26,14 @@ mod imp {
         pub dtmf_button: TemplateChild<gtk4::ToggleButton>,
         #[template_child]
         pub dtmf_revealer: TemplateChild<gtk4::Revealer>,
+        #[template_child]
+        pub transfer_button: TemplateChild<gtk4::ToggleButton>,
+        #[template_child]
+        pub transfer_entry: TemplateChild<gtk4::Entry>,
+        #[template_child]
+        pub transfer_revealer: TemplateChild<gtk4::Revealer>,
+        #[template_child]
+        pub consult_revealer: TemplateChild<gtk4::Revealer>,
         #[template_child]
         pub answer_button: TemplateChild<gtk4::Button>,
         #[template_child]
@@ -65,6 +75,14 @@ mod imp {
                     glib::subclass::Signal::builder("dtmf-digit")
                         .param_types([String::static_type()])
                         .build(),
+                    glib::subclass::Signal::builder("transfer-blind-requested")
+                        .param_types([String::static_type()])
+                        .build(),
+                    glib::subclass::Signal::builder("consult-requested")
+                        .param_types([String::static_type()])
+                        .build(),
+                    glib::subclass::Signal::builder("transfer-complete-requested").build(),
+                    glib::subclass::Signal::builder("consult-cancel-requested").build(),
                 ]
             })
         }
@@ -108,6 +126,42 @@ mod imp {
                 self.obj()
                     .emit_by_name::<()>("dtmf-digit", &[&label.as_str()]);
             }
+        }
+
+        #[template_callback]
+        fn on_transfer_toggled(&self, button: &gtk4::ToggleButton) {
+            self.transfer_revealer.set_reveal_child(button.is_active());
+            if !button.is_active() {
+                self.transfer_entry.set_text("");
+            }
+        }
+
+        #[template_callback]
+        fn on_blind_transfer_clicked(&self, _button: &gtk4::Button) {
+            let number = self.transfer_entry.text().to_string();
+            if !number.is_empty() {
+                self.obj().emit_by_name::<()>("transfer-blind-requested", &[&number]);
+                self.transfer_button.set_active(false);
+            }
+        }
+
+        #[template_callback]
+        fn on_consult_clicked(&self, _button: &gtk4::Button) {
+            let number = self.transfer_entry.text().to_string();
+            if !number.is_empty() {
+                self.obj().emit_by_name::<()>("consult-requested", &[&number]);
+                self.transfer_button.set_active(false);
+            }
+        }
+
+        #[template_callback]
+        fn on_complete_transfer_clicked(&self, _button: &gtk4::Button) {
+            self.obj().emit_by_name::<()>("transfer-complete-requested", &[]);
+        }
+
+        #[template_callback]
+        fn on_cancel_consult_clicked(&self, _button: &gtk4::Button) {
+            self.obj().emit_by_name::<()>("consult-cancel-requested", &[]);
         }
     }
 }
@@ -168,9 +222,32 @@ impl CallScreen {
             id.remove();
         }
         imp.call_start.set(None);
-        // Also collapse the DTMF keypad and reset the toggle button
+        // Reset all toggle buttons and their revealers
+        imp.mute_button.set_active(false);
+        imp.hold_button.set_active(false);
         imp.dtmf_button.set_active(false);
         imp.dtmf_revealer.set_reveal_child(false);
+        // Reset transfer UI
+        imp.transfer_button.set_active(false);
+        imp.transfer_revealer.set_reveal_child(false);
+        imp.transfer_entry.set_text("");
+        // Exit consult mode
+        self.exit_consult_mode();
+    }
+
+    pub fn enter_consult_mode(&self, held_name: &str) {
+        let imp = self.imp();
+        imp.held_label.set_label(&format!("Holding: {held_name}"));
+        imp.held_label.set_visible(true);
+        imp.transfer_revealer.set_reveal_child(false);
+        imp.transfer_button.set_active(false);
+        imp.consult_revealer.set_reveal_child(true);
+    }
+
+    pub fn exit_consult_mode(&self) {
+        let imp = self.imp();
+        imp.held_label.set_visible(false);
+        imp.consult_revealer.set_reveal_child(false);
     }
 }
 

@@ -48,10 +48,21 @@
                 <style><class name="title-4"/><class name="dim-label"/></style>
               </object>
             </child>
+
+            <!-- Held label (visible during consultation) -->
+            <child>
+              <object class="GtkLabel" id="held_label">
+                <property name="visible">false</property>
+                <property name="halign">center</property>
+                <property name="margin-top">8</property>
+                <style><class name="caption"/><class name="dim-label"/></style>
+              </object>
+            </child>
+
           </object>
         </child>
 
-        <!-- In-call controls (mute / hold / dtmf) -->
+        <!-- In-call controls (mute / hold / dtmf / transfer) -->
         <child>
           <object class="GtkBox">
             <property name="halign">center</property>
@@ -81,6 +92,15 @@
                 <property name="icon-name">input-dialpad-symbolic</property>
                 <property name="tooltip-text">DTMF keypad</property>
                 <signal name="toggled" handler="on_dtmf_toggled" swapped="yes"/>
+                <style><class name="circular"/><class name="flat"/></style>
+              </object>
+            </child>
+
+            <child>
+              <object class="GtkToggleButton" id="transfer_button">
+                <property name="icon-name">call-outgoing-symbolic</property>
+                <property name="tooltip-text">Transfer</property>
+                <signal name="toggled" handler="on_transfer_toggled" swapped="yes"/>
                 <style><class name="circular"/><class name="flat"/></style>
               </object>
             </child>
@@ -199,6 +219,81 @@
                   </object>
                 </child>
 
+              </object>
+            </child>
+          </object>
+        </child>
+
+        <!-- Transfer input (slides in when transfer_button is active) -->
+        <child>
+          <object class="GtkRevealer" id="transfer_revealer">
+            <property name="reveal-child">false</property>
+            <property name="transition-type">slide-down</property>
+            <property name="margin-bottom">4</property>
+            <child>
+              <object class="GtkBox" id="transfer_input_box">
+                <property name="orientation">vertical</property>
+                <property name="spacing">8</property>
+                <property name="margin-start">24</property>
+                <property name="margin-end">24</property>
+
+                <child>
+                  <object class="GtkEntry" id="transfer_entry">
+                    <property name="placeholder-text">Number or SIP URI</property>
+                    <property name="input-purpose">phone</property>
+                  </object>
+                </child>
+
+                <child>
+                  <object class="GtkBox">
+                    <property name="halign">center</property>
+                    <property name="spacing">16</property>
+                    <child>
+                      <object class="GtkButton" id="blind_transfer_button">
+                        <property name="label">Transfer Now</property>
+                        <signal name="clicked" handler="on_blind_transfer_clicked" swapped="yes"/>
+                        <style><class name="pill"/></style>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkButton" id="consult_button">
+                        <property name="label">Consult First</property>
+                        <signal name="clicked" handler="on_consult_clicked" swapped="yes"/>
+                        <style><class name="pill"/></style>
+                      </object>
+                    </child>
+                  </object>
+                </child>
+
+              </object>
+            </child>
+          </object>
+        </child>
+
+        <!-- Consultation controls (shown during active consultation) -->
+        <child>
+          <object class="GtkRevealer" id="consult_revealer">
+            <property name="reveal-child">false</property>
+            <property name="transition-type">slide-down</property>
+            <property name="margin-bottom">4</property>
+            <child>
+              <object class="GtkBox">
+                <property name="halign">center</property>
+                <property name="spacing">16</property>
+                <child>
+                  <object class="GtkButton" id="complete_transfer_button">
+                    <property name="label">Complete Transfer</property>
+                    <signal name="clicked" handler="on_complete_transfer_clicked" swapped="yes"/>
+                    <style><class name="pill"/><class name="suggested-action"/></style>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkButton" id="cancel_consult_button">
+                    <property name="label">Cancel</property>
+                    <signal name="clicked" handler="on_cancel_consult_clicked" swapped="yes"/>
+                    <style><class name="pill"/></style>
+                  </object>
+                </child>
               </object>
             </child>
           </object>
