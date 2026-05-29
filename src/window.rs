@@ -6,6 +6,7 @@ use adw::prelude::*;
 use adw::subclass::prelude::*;
 
 use crate::audio::AudioSession;
+use crate::ringer::Ringer;
 use crate::sip::{SipEngine, SipEvent};
 use crate::widgets::{CallScreen, Dialpad, SettingsDialog};
 
@@ -29,6 +30,7 @@ mod imp {
         pub sip_engine: RefCell<Option<SipEngine>>,
         pub audio_session: RefCell<Option<AudioSession>>,
         pub consult_session: RefCell<Option<AudioSession>>,
+        pub ringer: RefCell<Option<Ringer>>,
         /// Name/number of the primary caller, used for the "Holding: …" label.
         pub primary_caller: RefCell<String>,
         /// Periodic registration keepalive timer (re-sends REGISTER every 2 minutes).
@@ -295,8 +297,10 @@ mod imp {
                         cs.show_answer_button(true);
                     }
                     self.show_call_screen(true);
+                    *self.ringer.borrow_mut() = Ringer::start_incoming();
                 }
                 SipEvent::CallConnected => {
+                    *self.ringer.borrow_mut() = None;
                     if let Some(cs) = self.call_screen.get() {
                         cs.show_answer_button(false);
                         cs.start_timer();
@@ -315,6 +319,7 @@ mod imp {
                     }
                 }
                 SipEvent::CallEnded => {
+                    *self.ringer.borrow_mut() = None;
                     *self.audio_session.borrow_mut() = None;
                     *self.consult_session.borrow_mut() = None;
                     if let Some(cs) = self.call_screen.get() { cs.stop_timer(); }
@@ -322,6 +327,7 @@ mod imp {
                     if let Some(dialpad) = self.dialpad.get() { dialpad.clear(); }
                 }
                 SipEvent::CallFailed(reason) => {
+                    *self.ringer.borrow_mut() = None;
                     *self.audio_session.borrow_mut() = None;
                     *self.consult_session.borrow_mut() = None;
                     if let Some(cs) = self.call_screen.get() { cs.stop_timer(); }
@@ -330,6 +336,7 @@ mod imp {
                         .add_toast(error_toast(&format!("Call failed: {reason}")));
                 }
                 SipEvent::TransferOk => {
+                    *self.ringer.borrow_mut() = None;
                     *self.audio_session.borrow_mut() = None;
                     *self.consult_session.borrow_mut() = None;
                     if let Some(cs) = self.call_screen.get() { cs.stop_timer(); }
@@ -387,6 +394,7 @@ mod imp {
                     cs.show_answer_button(false);
                 }
                 self.show_call_screen(true);
+                *self.ringer.borrow_mut() = Ringer::start_ringback();
                 engine.make_call(number);
             } else {
                 let toast = adw::Toast::new("Not registered — configure SIP account first");
