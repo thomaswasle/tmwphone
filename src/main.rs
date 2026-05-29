@@ -1,5 +1,6 @@
 mod application;
 mod audio;
+mod call_log;
 mod config;
 mod keyring;
 mod ringer;

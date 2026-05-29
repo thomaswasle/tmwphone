@@ -6,12 +6,24 @@ use adw::prelude::*;
 use adw::subclass::prelude::*;
 
 use crate::audio::AudioSession;
+use crate::call_log;
 use crate::ringer::Ringer;
 use crate::sip::{SipEngine, SipEvent};
 use crate::widgets::{CallScreen, Dialpad, SettingsDialog};
 
 mod imp {
     use super::*;
+
+    // ── Per-call tracking ─────────────────────────────────────────────────────
+
+    pub struct PendingCall {
+        pub direction: call_log::Direction,
+        pub number: String,
+        pub started_at: i64,
+        pub connected_at: Option<i64>,
+    }
+
+    // ── Window struct ─────────────────────────────────────────────────────────
 
     #[derive(CompositeTemplate, Default)]
     #[template(file = "../data/ui/window.ui")]
@@ -27,6 +39,7 @@ mod imp {
 
         pub dialpad: OnceCell<Dialpad>,
         pub call_screen: OnceCell<CallScreen>,
+        pub call_list_box: OnceCell<gtk4::ListBox>,
         pub sip_engine: RefCell<Option<SipEngine>>,
         pub audio_session: RefCell<Option<AudioSession>>,
         pub consult_session: RefCell<Option<AudioSession>>,
@@ -35,6 +48,8 @@ mod imp {
         pub primary_caller: RefCell<String>,
         /// Periodic registration keepalive timer (re-sends REGISTER every 2 minutes).
         pub keepalive_timer: RefCell<Option<glib::SourceId>>,
+        pub call_log: RefCell<call_log::CallLog>,
+        pub pending_call: RefCell<Option<PendingCall>>,
     }
 
     #[glib::object_subclass]
@@ -81,6 +96,46 @@ mod imp {
                 ),
             );
             self.dialpad.set(dialpad).unwrap();
+
+            // ── Recents tab ───────────────────────────────────────────────────
+
+            let list_box = gtk4::ListBox::new();
+            list_box.set_selection_mode(gtk4::SelectionMode::None);
+            list_box.add_css_class("boxed-list");
+
+            let placeholder = gtk4::Label::builder()
+                .label("No recent calls")
+                .margin_top(48)
+                .margin_bottom(48)
+                .build();
+            placeholder.add_css_class("dim-label");
+            list_box.set_placeholder(Some(&placeholder));
+
+            let recents_inner = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+            recents_inner.set_margin_top(12);
+            recents_inner.set_margin_bottom(12);
+            recents_inner.set_margin_start(12);
+            recents_inner.set_margin_end(12);
+            recents_inner.append(&list_box);
+
+            let recents_scroll = gtk4::ScrolledWindow::new();
+            recents_scroll.set_vexpand(true);
+            recents_scroll.set_child(Some(&recents_inner));
+
+            self.view_stack.add_titled_with_icon(
+                &recents_scroll,
+                Some("recents"),
+                "Recents",
+                "recent-activity-symbolic",
+            );
+            self.call_list_box.set(list_box.clone()).unwrap();
+
+            // Populate the list from persisted log (newest first = index 0 appended first)
+            let log = call_log::CallLog::load();
+            for record in &log.records {
+                list_box.append(&self.make_call_row(record));
+            }
+            *self.call_log.borrow_mut() = log;
 
             // Attach call screen to the revealer overlay
             let call_screen = CallScreen::new();
@@ -292,18 +347,27 @@ mod imp {
                 SipEvent::IncomingCall { from } => {
                     *self.primary_caller.borrow_mut() = from.clone();
                     if let Some(cs) = self.call_screen.get() {
-                        cs.set_caller(&from);
+                        cs.set_caller(&call_log::display_name(&from));
                         cs.set_duration("Incoming call…");
                         cs.show_answer_button(true);
                     }
                     self.show_call_screen(true);
                     *self.ringer.borrow_mut() = Ringer::start_incoming();
+                    *self.pending_call.borrow_mut() = Some(PendingCall {
+                        direction: call_log::Direction::Incoming,
+                        number: from,
+                        started_at: now_unix(),
+                        connected_at: None,
+                    });
                 }
                 SipEvent::CallConnected => {
                     *self.ringer.borrow_mut() = None;
                     if let Some(cs) = self.call_screen.get() {
                         cs.show_answer_button(false);
                         cs.start_timer();
+                    }
+                    if let Some(p) = self.pending_call.borrow_mut().as_mut() {
+                        p.connected_at = Some(now_unix());
                     }
                 }
                 SipEvent::CallMedia { local_rtp_port, remote_ip, remote_rtp_port, codec } => {
@@ -325,6 +389,7 @@ mod imp {
                     if let Some(cs) = self.call_screen.get() { cs.stop_timer(); }
                     self.show_call_screen(false);
                     if let Some(dialpad) = self.dialpad.get() { dialpad.clear(); }
+                    self.finalize_pending_call(false);
                 }
                 SipEvent::CallFailed(reason) => {
                     *self.ringer.borrow_mut() = None;
@@ -334,6 +399,7 @@ mod imp {
                     self.show_call_screen(false);
                     self.toast_overlay
                         .add_toast(error_toast(&format!("Call failed: {reason}")));
+                    self.finalize_pending_call(true);
                 }
                 SipEvent::TransferOk => {
                     *self.ringer.borrow_mut() = None;
@@ -341,6 +407,7 @@ mod imp {
                     *self.consult_session.borrow_mut() = None;
                     if let Some(cs) = self.call_screen.get() { cs.stop_timer(); }
                     self.show_call_screen(false);
+                    self.finalize_pending_call(false);
                     let toast = adw::Toast::new("Call transferred successfully");
                     toast.set_timeout(4);
                     self.toast_overlay.add_toast(toast);
@@ -395,6 +462,12 @@ mod imp {
                 }
                 self.show_call_screen(true);
                 *self.ringer.borrow_mut() = Ringer::start_ringback();
+                *self.pending_call.borrow_mut() = Some(PendingCall {
+                    direction: call_log::Direction::Outgoing,
+                    number: number.to_owned(),
+                    started_at: now_unix(),
+                    connected_at: None,
+                });
                 engine.make_call(number);
             } else {
                 let toast = adw::Toast::new("Not registered — configure SIP account first");
@@ -412,6 +485,82 @@ mod imp {
             if let Some(engine) = self.sip_engine.borrow().as_ref() {
                 engine.hangup();
             }
+        }
+
+        // ── Call log helpers ─────────────────────────────────────────────────
+
+        fn finalize_pending_call(&self, outgoing_failed: bool) {
+            let Some(pending) = self.pending_call.borrow_mut().take() else { return };
+            let now = now_unix();
+            let (status, duration) = match pending.connected_at {
+                Some(t) => (call_log::Status::Answered, (now - t).max(0) as u32),
+                None => {
+                    let status = if pending.direction == call_log::Direction::Incoming {
+                        call_log::Status::Missed
+                    } else if outgoing_failed {
+                        call_log::Status::Failed
+                    } else {
+                        call_log::Status::Failed // outgoing ended before connect
+                    };
+                    (status, 0)
+                }
+            };
+            let record = call_log::Record {
+                direction: pending.direction,
+                status,
+                number: pending.number,
+                started_at: pending.started_at,
+                duration_secs: duration,
+            };
+            if let Some(lb) = self.call_list_box.get() {
+                lb.prepend(&self.make_call_row(&record));
+            }
+            self.call_log.borrow_mut().push(record);
+        }
+
+        fn make_call_row(&self, record: &call_log::Record) -> adw::ActionRow {
+            use call_log::{Direction, Status};
+
+            let (icon_name, icon_css) = match (record.direction, record.status) {
+                (Direction::Incoming, Status::Answered) => ("call-incoming-symbolic",  "success"),
+                (Direction::Incoming, _)                => ("call-missed-symbolic",    "error"),
+                (Direction::Outgoing, Status::Answered) => ("call-outgoing-symbolic",  "accent"),
+                (Direction::Outgoing, _)                => ("call-outgoing-symbolic",  "dim-label"),
+            };
+
+            let icon = gtk4::Image::from_icon_name(icon_name);
+            icon.add_css_class(icon_css);
+            icon.set_pixel_size(16);
+            icon.set_margin_top(8);
+            icon.set_margin_bottom(8);
+
+            let title = call_log::display_name(&record.number);
+            let time  = call_log::format_time(record.started_at);
+            let subtitle = if record.duration_secs > 0 {
+                format!("{time} · {}", call_log::format_duration(record.duration_secs))
+            } else {
+                time
+            };
+
+            let row = adw::ActionRow::builder()
+                .title(title)
+                .subtitle(subtitle)
+                .activatable(true)
+                .build();
+            row.add_prefix(&icon);
+
+            // Tap to call back
+            let number = call_log::callable(&record.number);
+            let weak = self.obj().downgrade();
+            row.connect_activated(move |_| {
+                if let Some(obj) = weak.upgrade() {
+                    obj.imp().start_call(&number);
+                    // Switch to dialpad so the call screen is visible
+                    obj.imp().view_stack.set_visible_child_name("dialpad");
+                }
+            });
+
+            row
         }
 
         pub fn on_connect_requested(&self) {
@@ -470,6 +619,13 @@ mod imp {
             *self.keepalive_timer.borrow_mut() = Some(id);
         }
     }
+}
+
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// Parse "host" or "host:port" from the server settings field.
