@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <!-- Background gradient: purple matching the in-call button -->
+    <linearGradient id="bgGrad" x1="0.2" y1="0" x2="0.8" y2="1">
+      <stop offset="0%" stop-color="#9b6dce"/>
+      <stop offset="100%" stop-color="#5c3191"/>
+    </linearGradient>
+    <!-- Subtle highlight on top-left edge -->
+    <linearGradient id="rimGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.18"/>
+      <stop offset="60%" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background plate -->
+  <rect x="0" y="0" width="128" height="128" rx="26" ry="26" fill="url(#bgGrad)"/>
+  <!-- Rim highlight -->
+  <rect x="0" y="0" width="128" height="128" rx="26" ry="26" fill="url(#rimGrad)"/>
+
+  <!-- Phone handset (Material Design phone path, scaled 3.5× and centred) -->
+  <g transform="translate(21, 22) scale(3.6)" fill="white" opacity="0.97">
+    <path d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2
+             c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57
+             .55 0 1 .45 1 1V20c0 .55-.45 1-1 1
+             C10.61 21 3 13.39 3 4
+             c0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1
+             0 1.25.2 2.45.57 3.57.11.35.03.74-.24 1.02l-2.2 2.2z"/>
+  </g>
+
+  <!-- VoIP signal arcs (upper-right corner, suggesting wireless/internet) -->
+  <g fill="none" stroke="white" stroke-linecap="round" opacity="0.75">
+    <!-- innermost arc -->
+    <path d="M 84 28 A 8 8 0 0 1 98 28"  stroke-width="4.5"/>
+    <!-- middle arc -->
+    <path d="M 79 21 A 16 16 0 0 1 103 21" stroke-width="4"/>
+    <!-- outer arc -->
+    <path d="M 74 14 A 24 24 0 0 1 108 14" stroke-width="3.5"/>
+  </g>
+  <!-- Dot below arcs (wifi dot) -->
+  <circle cx="91" cy="35" r="3.5" fill="white" opacity="0.75"/>
+</svg>
