@@ -22,3 +22,5 @@ debian/debhelper-build-stamp
 debian/files
 debian/tmwphone/
 debian/tmwphone.substvars
+debian/cargo_registry/
+debian/*.debhelper.log

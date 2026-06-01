@@ -36,6 +36,9 @@ window.rs          — MainWindow: top-level UI orchestration, owns SipEngine + 
 │   ├── sip/ffi.rs — unsafe extern "C" declarations
 │   └── sip/glue.c — sofia-sip NUA integration (SIP signaling, SDP, digest auth)
 ├── audio.rs       — AudioSession: GStreamer RTP pipelines (send + recv)
+├── ringer.rs      — Ringer: GStreamer tone-generator for incoming/ringback tones
+├── call_log.rs    — CallLog: persistent call history (newest-first, max 500 records)
+├── keyring.rs     — libsecret wrapper for SIP password storage
 └── widgets/       — Composite GTK4 widgets (CallScreen, Dialpad, SettingsDialog)
 ```
 
@@ -55,6 +58,26 @@ window.rs          — MainWindow: top-level UI orchestration, owns SipEngine + 
 - `rtpjitterbuffer latency=50` + `autoaudiosink sync=false` avoids a ~30 s startup silence caused by RTP timestamp mismatch.
 - Codec is negotiated by the SIP layer and passed as a `u8` (0 = PCMU, 8 = PCMA).
 
+### Ringer (`src/ringer.rs`)
+
+- `Ringer` owns a GStreamer pipeline (`audiotestsrc → volume → audioconvert → audioresample → autoaudiosink`) and drives a cadence via chained `glib::timeout_add_local` callbacks that toggle the `volume` element.
+- `Ringer::start_incoming()` — 440 Hz, cadence 400/200/400/2000 ms (on/off/on/off).
+- `Ringer::start_ringback()` — 425 Hz, cadence 1000/3000 ms (on/off).
+- RAII: `Drop` sets `alive = false` (stops the cadence loop) and sets the pipeline to `State::Null`. `MainWindow` holds `ringer: RefCell<Option<Ringer>>`; setting it to `None` stops the tone immediately.
+- Do **not** set `is-live=true` on `audiotestsrc` or `sync=false` on `autoaudiosink` — both cause glitching on a local tone generator (unlike the RTP pipelines where `sync=false` is required).
+
+### Call log (`src/call_log.rs`)
+
+- `CallLog` persists call records to `~/.local/share/tmwphone/calls.log` (pipe-delimited: `timestamp|direction|status|number|duration_secs`). Newest-first; capped at 500 entries.
+- `CallLog::push()` inserts at index 0 and immediately rewrites the file.
+- Display helpers: `display_name(raw)` extracts a human-readable label from a raw From-URI or dialled number; `callable(raw)` extracts the dialable address for call-back; `format_time` and `format_duration` format timestamps and durations for the UI.
+
+### Keyring (`src/keyring.rs`)
+
+- Thin wrapper around `libsecret` (`libsecret::password_store/lookup/clear_sync`) using schema `net.loca.TMWPhone` with attribute `service = "sip-account"`.
+- `keyring::save`, `keyring::load`, `keyring::clear` — called from `SettingsDialog` (save/load) and `MainWindow` (load on startup).
+- The SIP password is **no longer stored in GSettings** — the `sip-password` key was removed from the schema.
+
 ### UI layer
 
 - **`window.rs`** (`MainWindow`) owns `SipEngine` and `AudioSession` in `RefCell`s, connects all widget signals, and drives state transitions in response to `SipEvent`s.
@@ -64,7 +87,7 @@ window.rs          — MainWindow: top-level UI orchestration, owns SipEngine + 
 
 ### GSettings
 
-Schema: `net.loca.TMWPhone` (`data/net.loca.TMWPhone.gschema.xml`). Keys: `sip-server`, `sip-username`, `sip-password` (plaintext, dev only — TODO: migrate to libsecret), `sip-display-name`, `sip-port`. Settings are read directly from `gio::Settings` in `window.rs`; the `src/config.rs` wrapper is unused.
+Schema: `net.loca.TMWPhone` (`data/net.loca.TMWPhone.gschema.xml`). Keys: `sip-server`, `sip-username`, `sip-display-name`, `sip-port`, `audio-input-device` (integer, -1 = system default), `audio-output-device` (integer, -1 = system default). The SIP password is stored in the system keyring via `src/keyring.rs`, not in GSettings. Settings are read directly from `gio::Settings` in `window.rs`; the `src/config.rs` wrapper is unused.
 
 ## Key constraints
 
