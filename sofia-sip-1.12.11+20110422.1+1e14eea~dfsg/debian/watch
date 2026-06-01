@@ -1,0 +1,13 @@
+version=4
+# check: uscan --report
+# update: gbp import-orig --uscan
+#
+# NB! below is unusual (see "man uscan" for common Github pattern)
+
+opts=\
+filenamemangle=s/.*?(@ANY_VERSION@@ARCHIVE_EXT@)/@PACKAGE@-$1/,\
+uversionmangle=s/^/1.12.12~/,\
+repacksuffix=~dfsg,\
+dversionmangle=auto \
+https://gitlab.linphone.org/BC/public/external/sofia-sip/-/tags \
+.*?@ANY_VERSION@@ARCHIVE_EXT@

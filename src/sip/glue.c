@@ -28,6 +28,7 @@ struct SofiaCtx {
     char             *user;
     char             *password;
     char             *server;
+    int               sip_port;   /* registrar port stored for explicit re-REGISTER */
     char             *auth_str;
     char             *call_to;    /* To URI of the current outgoing call */
     char              local_ip[INET_ADDRSTRLEN];
@@ -42,6 +43,17 @@ struct SofiaCtx {
     gboolean          call_on_hold;
     gboolean          shutting_down;
     gboolean          shutdown_done;
+
+    /* On every startup, before doing the normal REGISTER, we first send
+       REGISTER Contact:* Expires:0 to Asterisk.  This removes ALL bindings
+       from previous sessions that were never properly unregistered (because
+       std::process::exit() bypasses Rust/GObject destructors).  Without
+       this, Asterisk accumulates stale contacts and routes incoming calls
+       to dead old ports.  cleanup_registrar stores the URI for the deferred
+       real nua_register() call after the cleanup completes. */
+    gboolean          cleanup_pending;
+    char             *cleanup_registrar;
+
 
     /* Consultation call fields */
     nua_handle_t     *consult_nh;
@@ -410,9 +422,6 @@ static void nua_cb(nua_event_t event, int status, char const *phrase,
 
     case nua_r_register:
         if (status == 200) {
-            /* Store credentials globally so NUA auto-retries any 401/407
-               challenge (INVITE, etc.) without needing a callback round-trip. */
-            nua_set_params(ctx->nua, NUTAG_AUTH(ctx->auth_str), TAG_END());
             ctx->cb(SOFIA_EV_REGISTER_OK, status, phrase, NULL, ctx->userdata);
         } else if ((status == 401 || status == 407) && ctx->user && ctx->password) {
             msg_auth_t const *challenge = (status == 401)
@@ -421,13 +430,40 @@ static void nua_cb(nua_event_t event, int status, char const *phrase,
             char *realm = extract_realm(challenge);
             build_auth(ctx, realm ? realm : ctx->server);
             free(realm);
+            /* nua_authenticate() passes credentials at the handle level;
+               sofia caches them for keepalive REGISTER refreshes on this
+               handle, so no NUA-level nua_set_params(NUTAG_AUTH) is needed.
+               Calling nua_set_params here fires nua_r_set_params (event=23)
+               which has no functional benefit and adds unnecessary
+               state-machine churn before the 200 OK arrives. */
             nua_authenticate(nh, NUTAG_AUTH(ctx->auth_str), TAG_END());
         } else if (status >= 300) {
             ctx->cb(SOFIA_EV_REGISTER_FAIL, status, phrase, NULL, ctx->userdata);
         }
+        /* 1xx provisional and internal (0) statuses: wait for final response. */
         break;
 
     case nua_r_unregister:
+        if (!ctx->cleanup_pending) break;
+
+        if (status == 401 || status == 407) {
+            /* Asterisk challenges the wildcard unregister — authenticate. */
+            msg_auth_t const *challenge = (status == 401)
+                ? sip->sip_www_authenticate
+                : sip->sip_proxy_authenticate;
+            char *realm = extract_realm(challenge);
+            build_auth(ctx, realm ? realm : ctx->server);
+            free(realm);
+            nua_authenticate(nh, NUTAG_AUTH(ctx->auth_str), TAG_END());
+        } else {
+            /* 200 OK (all contacts removed) or any error (404, 403, ...) —
+               either way, proceed with the real registration.  Errors just
+               mean there was nothing to remove, which is fine. */
+            ctx->cleanup_pending = FALSE;
+            nua_register(ctx->reg_nh,
+                         NUTAG_REGISTRAR(ctx->cleanup_registrar),
+                         TAG_END());
+        }
         break;
 
     case nua_i_invite: {
@@ -615,6 +651,7 @@ static void nua_cb(nua_event_t event, int status, char const *phrase,
         /* 200 OK response to our SIP INFO (DTMF) — nothing to do. */
         break;
 
+
     case nua_i_error:
         if (nh == ctx->consult_nh) {
             if (!ctx->consult_ended)
@@ -666,12 +703,28 @@ SofiaCtx *sofia_ctx_create(const char *server, int port,
 
     /* Attach the su_root GLib source to the default main context so that
        NUA application callbacks are dispatched back to the GTK main thread.
-       su_glib_root_create(NULL) creates the source but does not attach it. */
+
+       su_glib_root_gsource() returns a borrowed pointer (no extra ref for
+       the caller).  In some code paths inside su_glib_root_create(NULL),
+       sofia's GLib integration already attaches the source internally and
+       drops the creation reference, leaving refcount=1 (held only by the
+       context).  Calling g_source_unref() on that would free the source and
+       silently detach it from the main loop — sofia events then stop firing
+       for the entire session (intermittent at startup because the internal
+       path is timing-dependent).
+
+       Fix: if the source is already attached, do a compensating ref before
+       the unref so the context's reference is never the one we drop. */
     {
         GSource *src = su_glib_root_gsource(ctx->root);
         if (src) {
-            if (!g_source_get_context(src))
+            if (!g_source_get_context(src)) {
                 g_source_attach(src, NULL);
+            } else {
+                /* Source already attached — take an extra ref so the unref
+                   below cannot be the one that frees the source. */
+                g_source_ref(src);
+            }
             g_source_unref(src);
         }
     }
@@ -720,6 +773,7 @@ void sofia_ctx_destroy(SofiaCtx *ctx) {
     free(ctx->server);
     free(ctx->auth_str);
     free(ctx->call_to);
+    free(ctx->cleanup_registrar);
     free(ctx->consult_to);
     free(ctx->consult_call_id);
     free(ctx->consult_from_tag);
@@ -739,9 +793,12 @@ void sofia_register(SofiaCtx   *ctx,
     free(ctx->user);     ctx->user     = strdup(user);
     free(ctx->password); ctx->password = strdup(password);
     free(ctx->server);   ctx->server   = strdup(server);
+    ctx->sip_port = port;
 
-    /* Build tentative auth string using server hostname as realm;
-       will be corrected from the WWW-Authenticate realm on first 401. */
+    /* Auth string is populated from the 401 WWW-Authenticate realm;
+       pre-fill with server hostname so build_auth has a non-NULL ctx->auth_str
+       before the 401 arrives.  The NUA-level NUTAG_AUTH is set in the 401
+       handler once the real realm is known. */
     build_auth(ctx, server);
 
     char registrar[512], from[512];
@@ -755,12 +812,22 @@ void sofia_register(SofiaCtx   *ctx,
                               SIPTAG_TO_STR(from),
                               TAG_END());
 
-    /* Do not pass SIPTAG_CONTACT_STR — let NUA build it from the actual
-       bound address and port.  An explicit "sip:user@ip:0" contact causes
-       Asterisk to try delivering INVITEs to port 0, which silently fails. */
-    nua_register(ctx->reg_nh,
-                 NUTAG_REGISTRAR(registrar),
-                 TAG_END());
+    /* Store registrar URI for use after the startup cleanup completes. */
+    free(ctx->cleanup_registrar);
+    ctx->cleanup_registrar = strdup(registrar);
+    ctx->cleanup_pending   = TRUE;
+
+    /* Before the normal REGISTER, remove ALL contacts from previous sessions
+       that were never properly unregistered.  Without this, Asterisk
+       accumulates stale bindings and routes incoming calls to dead old ports.
+       nua_r_unregister fires the response; when 200 OK arrives it calls the
+       real nua_register().  On 401 it authenticates and retries.  On any
+       error (404, etc.) it also proceeds — nothing to clean up is fine. */
+    nua_unregister(ctx->reg_nh,
+                   NUTAG_REGISTRAR(registrar),
+                   SIPTAG_CONTACT_STR("*"),
+                   SIPTAG_EXPIRES_STR("0"),
+                   TAG_END());
 }
 
 void sofia_unregister(SofiaCtx *ctx) {
@@ -769,8 +836,7 @@ void sofia_unregister(SofiaCtx *ctx) {
 
 void sofia_reregister(SofiaCtx *ctx) {
     if (!ctx->reg_nh) return;
-    /* Re-send REGISTER on the existing handle. Sofia reuses the previously
-       negotiated registrar and credentials stored via nua_set_params. */
+    /* Refresh the registration without resetting any handle-level state. */
     nua_register(ctx->reg_nh, TAG_END());
 }
 

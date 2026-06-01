@@ -2,7 +2,7 @@ Package: tmwphone
 Version: 0.1.0-1
 Architecture: amd64
 Maintainer: Thomas Müller-Wasle <mueller@loca.net>
-Installed-Size: 1971
+Installed-Size: 1979
 Depends: libadwaita-1-0 (>= 1.6~beta), libc6 (>= 2.34), libcairo2 (>= 1.2.4), libgcc-s1 (>= 4.2), libgdk-pixbuf-2.0-0 (>= 2.22.0), libglib2.0-0t64 (>= 2.54.0), libgstreamer1.0-0 (>= 1.6.0), libgtk-4-1 (>= 4.12.0), libpango-1.0-0 (>= 1.14.0), libsecret-1-0 (>= 0.7), libsofia-sip-ua-glib3t64 (>= 1.12.10), libsofia-sip-ua0t64 (>= 1.12.11), dconf-gsettings-backend | gsettings-backend, gstreamer1.0-plugins-good, gstreamer1.0-plugins-base, gstreamer1.0-pulseaudio
 Section: net
 Priority: optional

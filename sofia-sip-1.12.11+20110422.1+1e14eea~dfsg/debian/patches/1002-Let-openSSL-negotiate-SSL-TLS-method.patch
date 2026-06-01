@@ -1,0 +1,21 @@
+Description: Let openSSL negotiate SSL/TLS method
+Author: Evangelos Ribeiro Tzaras <devrtz@fortysixandtwo.eu>
+Last-Update: 2022-05-12
+---
+This patch header follows DEP-3: https://dep-team.pages.debian.net/deps/dep3/
+--- a/libsofia-sip-ua/tport/tport_tls.c
++++ b/libsofia-sip-ua/tport/tport_tls.c
+@@ -296,10 +296,13 @@
+     /* meth = SSLv3_method(); */
+     /* meth = SSLv23_method(); */
+ 
++    /* NO ES BUENO
+     if (ti->version)
+       meth = TLSv1_method();
+     else
+       meth = SSLv23_method();
++    */
++    meth = TLS_method();
+ 
+     tls->ctx = SSL_CTX_new((SSL_METHOD*)meth);
+   }

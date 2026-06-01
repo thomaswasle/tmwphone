@@ -1,0 +1,357 @@
+sofia-sip (1.12.11+20110422.1+1e14eea~dfsg-6.1build3) resolute; urgency=medium
+
+  * No-change mass rebuild for Ubuntu 26.04 (LP: #2132257)
+
+ -- Graham Inggs <ginggs@ubuntu.com>  Fri, 09 Jan 2026 20:51:30 +0000
+
+sofia-sip (1.12.11+20110422.1+1e14eea~dfsg-6.1build2) noble; urgency=medium
+
+  * No-change rebuild for CVE-2024-3094
+
+ -- William Grant <wgrant@ubuntu.com>  Mon, 01 Apr 2024 15:46:50 +1100
+
+sofia-sip (1.12.11+20110422.1+1e14eea~dfsg-6.1build1) noble; urgency=medium
+
+  * No-change rebuild against libssl3t64
+
+ -- Steve Langasek <steve.langasek@ubuntu.com>  Mon, 04 Mar 2024 21:23:33 +0000
+
+sofia-sip (1.12.11+20110422.1+1e14eea~dfsg-6.1) unstable; urgency=medium
+
+  * Non-maintainer upload.
+  * Rename libraries for 64-bit time_t transition.  Closes: #1062909
+
+ -- Benjamin Drung <bdrung@debian.org>  Thu, 29 Feb 2024 16:59:57 +0000
+
+sofia-sip (1.12.11+20110422.1+1e14eea~dfsg-6) unstable; urgency=medium
+
+  * Add patch to fix reported CVE-2023-32307.
+    For further information see:
+    - CVE-2023-32307[0]
+    [0] https://security-tracker.debian.org/tracker/CVE-2023-32307
+    	https://www.cve.org/CVERecord?id=CVE-2023-32307 (closes: bug#1036847)
+
+ -- Evangelos Ribeiro Tzaras <devrtz-debian@fortysixandtwo.eu>  Mon, 29 May 2023 11:36:38 +0200
+
+sofia-sip (1.12.11+20110422.1+1e14eea~dfsg-5) unstable; urgency=medium
+
+  * Add patch to fix reported CVE; add copyright of patch.
+    For further information see:
+    - CVE-2022-47516[0]
+    [0] https://security-tracker.debian.org/tracker/CVE-2022-47516
+        https://www.cve.org/CVERecord?id=CVE-2022-47516 (closes: bug#1031792)
+
+ -- Evangelos Ribeiro Tzaras <devrtz-debian@fortysixandtwo.eu>  Tue, 23 May 2023 05:53:48 +0200
+
+sofia-sip (1.12.11+20110422.1+1e14eea~dfsg-4) unstable; urgency=high (fixes a CVE)
+
+  * Rename patches to indicate they have been picked from upstream
+  * Add patch to fix reported CVE; add copyright of patch.
+    For further information see:
+    - CVE-2023-22741[0]
+    [0] https://security-tracker.debian.org/tracker/CVE-2023-22741
+        https://www.cve.org/CVERecord?id=CVE-2023-22741
+    closes: bug#1029654, thanks to Salvatore Bonaccorso for reporting
+
+ -- Evangelos Ribeiro Tzaras <devrtz-debian@fortysixandtwo.eu>  Wed, 08 Feb 2023 09:46:57 +0100
+
+sofia-sip (1.12.11+20110422.1+1e14eea~dfsg-3) unstable; urgency=medium
+
+  * Add patches to fix reported CVEs.
+    For further information see:
+    - CVE-2022-31001[0]:
+    - CVE-2022-31002[1]:
+    - CVE-2022-31003[2]:
+    [0] https://security-tracker.debian.org/tracker/CVE-2022-31001
+        https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2022-31001
+    [1] https://security-tracker.debian.org/tracker/CVE-2022-31002
+        https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2022-31002
+    [2] https://security-tracker.debian.org/tracker/CVE-2022-31003
+        https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2022-31003
+    closes: bug#1016974, thanks to Moritz Mühlenhoff
+
+ -- Evangelos Ribeiro Tzaras <devrtz-debian@fortysixandtwo.eu>  Sat, 13 Aug 2022 04:34:27 +0200
+
+sofia-sip (1.12.11+20110422.1+1e14eea~dfsg-2) unstable; urgency=medium
+
+  [ Evangelos Ribeiro Tzaras ]
+  * Update watchfile:
+    + Prefix upstream version with next expected official release
+  * Tighten changelog
+  * Add ${misc:Depends} for binary packages
+  * Split old changelog entries into separate file
+  * Use pkg-kde-tools to track symbols
+  * Add patch 1002 to use modern TLS methods;
+    closes: bug#871435, thanks to Sebastian Andrzej Siewior
+
+  [ Jonas Smedegaard ]
+  * tighten DEP-3 patch headers,
+    and refresh with shortening quilt options
+  * declare compliance with Debian Policy 4.6.1
+
+ -- Jonas Smedegaard <dr@jones.dk>  Thu, 12 May 2022 13:00:05 +0200
+
+sofia-sip (1.12.11+20110422.1+1e14eea~dfsg-1) unstable; urgency=medium
+
+  [ Evangelos Ribeiro Tzaras ]
+  * Salvage package under VoIP team;
+    Closes: #1003706, thanks for previous contributions to Ron Lee
+  * Add git-buildpackage configuration;
+    Copied from https://salsa.debian.org/pkg-voip-team/simple-whip-server
+  * Wrap and sort control files
+  * Declare debhelper compatibility implicitly;
+    Depend on debhelper-compat (not debhelper)
+  * Update Vcs-Git and Vcs-Browser: Package maintenance has moved to salsa
+  * Drop versioning of build dependency for dpkg-dev
+  * Revert "Hush an unused parameter warning for tag_ptr_vr()"
+  * Revert "Drop the stale su_socket_port_send declaration"
+  * Revert "Fix undefined behaviour accessing msg_mclass_s members"
+  * Use 3.0 quilt (not 1.0 native) packaging format
+  * Add previously directly applied patches
+  * Rewrite build rules to use short-form dh sequencer
+  * Use multiarch install paths
+  * Update copyright info; update coverage
+  * Add source helper script: copyright-check
+  * Add copyright hints
+  * Override lintian warnings about missing license information
+  * Add watch file
+
+  [ Jonas Smedegaard ]
+  * fix avoid compiling code in install targets
+
+ -- Jonas Smedegaard <dr@jones.dk>  Tue, 10 May 2022 13:35:45 +0200
+
+sofia-sip (1.12.11+20110422.1-2.2) unstable; urgency=medium
+
+  * Non-maintainer upload.
+  * Bump dh-compat to 13 (Closes: #965829)
+
+ -- Evangelos Ribeiro Tzaras <devrtz-debian@fortysixandtwo.eu>  Sat, 15 Jan 2022 12:03:56 +0100
+
+sofia-sip (1.12.11+20110422.1-2.1) unstable; urgency=medium
+
+  * Non-maintainer upload.
+  * Fix FTBFS with dpkg-buildpackge -A by ensuring that the
+    file Doxyfile.rfc is created before. (Closes: #806658)
+  * Move doxygen and graphviz to B-D-Indep.
+
+ -- Tobias Frost <tobi@debian.org>  Sun, 25 Sep 2016 09:42:01 +0200
+
+sofia-sip (1.12.11+20110422.1-2) unstable; urgency=low
+
+  * Fixes undefined behaviour that compiled into buggy code with gcc 4.8.
+    Thanks to Simon McVittie for originally spotting it and doing a lot of
+    legwork to pin it down; Ilya Melnikov for a useful clue about it being
+    a failure under heavy optimisation; and Radist Morse for hunting down
+    the precise location of the ill-formed code, correctly identifying the
+    real reason for the failure, and providing a patch.  Closes: #729301
+
+ -- Ron Lee <ron@debian.org>  Sat, 07 Dec 2013 00:46:33 +1030
+
+sofia-sip (1.12.11+20110422.1-1) unstable; urgency=low
+
+  * Update for newer autoconf/libtool, needed for some new arches.
+  * Typo fix in the package description.  Closes: #673678
+
+ -- Ron Lee <ron@debian.org>  Sun, 27 Oct 2013 05:21:33 +1030
+
+sofia-sip (1.12.11+20110422-1) unstable; urgency=low
+
+  * In the 1.12.11 release, SOATAG_LOCAL_SDP_STR_REF is broken (but that is
+    fixed in commmit bcd0f17f), so let's take a snapshot off HEAD for now.
+
+ -- Ron Lee <ron@debian.org>  Sun, 08 May 2011 05:09:29 +0930
+
+sofia-sip (1.12.11-1) unstable; urgency=low
+
+  * New faces.  Thanks for your work on this one George!
+  * Replace cdbs with a sensible rules file.  Fixes many bugs, including the
+    double pass of doxgen attributed to Some Reason in the ancient TODO.Debian,
+    and Closes: #595526 (the missing sip_extra.h header).
+  * We don't appear to have any remaining problems with unresolved symbols now,
+    Closes: #558959
+
+ -- Ron Lee <ron@debian.org>  Sun, 01 May 2011 01:11:11 +0930
+
+sofia-sip (1.12.10-4) unstable; urgency=low
+
+  * Upload to unstable.
+  * Add new symbols from experimental buildd logs:
+      libsofia-sip-ua0.symbols.alpha
+      libsofia-sip-ua0.symbols.mipsel
+  * Remove empty symbol files for unofficial architectures (will
+    be added eventually later as access to such buildd logs is available):
+      libsofia-sip-ua0.symbols.kfreebsd-i386
+      libsofia-sip-ua0.symbols.kfreebsd-amd64
+  * fix copyright link to point to LGPL-2.1 (though sources mention
+    LGPL version 2.1 or optionally any later)
+
+ -- George Danchev <danchev@spnet.net>  Sun, 15 Feb 2009 18:02:43 +0200
+
+sofia-sip (1.12.10-3) experimental; urgency=low
+
+  * "Steal symbol diffs from experimental buildd' logs" release
+
+  * Fix the header of libsofia-sip-ua-glib3.symbols (Closes: #512699)
+  * Downgrade dpkg-gensymbols check to -c1, since we want to fail
+    only when some symbols have disappeared (Closes: #512700).
+  * Add new symbols:
+      libsofia-sip-ua0.symbols.arm
+      libsofia-sip-ua0.symbols.armel
+      libsofia-sip-ua0.symbols.amd64
+      libsofia-sip-ua0.symbols.powerpc
+      libsofia-sip-ua0.symbols.ia64
+      libsofia-sip-ua0.symbols.sparc
+      libsofia-sip-ua0.symbols.s390
+      libsofia-sip-ua0.symbols.hppa
+      libsofia-sip-ua0.symbols.mips
+  * Add new files:
+      libsofia-sip-ua0.symbols.kfreebsd-i386
+      libsofia-sip-ua0.symbols.kfreebsd-amd64
+
+ -- George Danchev <danchev@spnet.net>  Sun, 11 Jan 2009 05:21:36 +0200
+
+sofia-sip (1.12.10-2) experimental; urgency=low
+
+  * added symbol files: libsofia-sip-ua-glib3.symbols and
+    libsofia-sip-ua0.symbols.ARCH (only i386 is currently
+    done, the rest would need the diffs of autobuilders logs)
+  * libsofia-sip-ua-glib0.install removed, no such package anymore
+  * added DEB_DH_MAKESHLIBS_ARGS_ALL := -- -c4
+  * get-orig-source: change wget options to
+    --no-check-certificate --quiet -nv -T20 -t3 -O
+
+ -- George Danchev <danchev@spnet.net>  Sun, 04 Jan 2009 15:47:56 +0200
+
+sofia-sip (1.12.10-1) experimental; urgency=low
+
+  * New upstream release
+
+  [ Patrick Matthäi ]
+  * Bumped Standards-Version to 3.8.0.
+  * Removed various whitespaces at EOL.
+
+  [ Mark Purcell ]
+  * Fix debhelper-but-no-misc-depends sofia-sip-doc
+  * Update MD5TRUSTED
+
+ -- Mark Purcell <msp@debian.org>  Sat, 03 Jan 2009 12:21:12 +1100
+
+sofia-sip (1.12.9-1) unstable; urgency=low
+
+  * New upstream release
+  * missing-dependency-on-libc: Add Depends: ${shlibs:Depends},
+    ${misc:Depends}
+
+ -- Mark Purcell <msp@debian.org>  Tue, 24 Jun 2008 21:25:48 +1000
+
+sofia-sip (1.12.8-1) unstable; urgency=low
+
+  [ Kai Vehmanen ]
+  * New upstream release.
+  * Contains fix to the memory leak bug in 1.12.7. (Closes: #452386)
+
+ -- Kai Vehmanen <kai.vehmanen@nokia.com>  Thu, 24 Jan 2008 18:52:36 +0200
+
+sofia-sip (1.12.7-1) unstable; urgency=low
+
+  * New upstream release
+
+ -- Mark Purcell <msp@debian.org>  Sun, 21 Oct 2007 13:37:54 +0100
+
+sofia-sip (1.12.6-2) unstable; urgency=low
+
+  [ Kai Vehmanen ]
+  * Set DEB_* variables after including CDBS macros, not before.
+  * The "--as-needed" linked option is now explicitly disabled (was
+    enabled before, but didn't work as it was in the wrong place).
+  * CDBS clean target was set to "clean". See
+    http://www.bononia.it/~zack/blog/posts/2007/09/clean_distclean.html.
+    (Closes: #442732)
+  * Another fix related to #442732: remove the doxygen output directories
+    in clean target. In upstream, the doxygen targets are not run
+    by default, so also the cleaning has to be done separately.
+
+ -- Kilian Krause <kilian@debian.org>  Fri, 18 May 2007 21:38:58 +0200
+
+sofia-sip (1.12.6-1) unstable; urgency=low
+
+  [ Kai Vehmanen ]
+  * Fixed inclusion of libsofia-sip-ua-glib3.so library to the
+    packages. Closes bug #419559.
+  * New upstream release.
+
+ -- Kilian Krause <kilian@debian.org>  Fri, 18 May 2007 20:15:48 +0200
+
+sofia-sip (1.12.5-1) unstable; urgency=low
+
+  [ Kai Vehmanen ]
+  * New upstream release
+    See the release notes at:
+    http://www.mail-archive.com/sofia-sip-devel@lists.sourceforge.net/msg01286.html
+  * Note that libsofia-sip-ua-glib ABI has changed, so libsofia-ua-glib3 replaces
+    libsofia-sip-ua-glib0. This is not a major change however, as this library
+    was not part of the stable set of interfaces, and no applications in Debian have
+    yet used the -glib0 library.
+  * Relaxed dependency from sofia-sip-bin to libsofia-sip-ua0 (allow newer versions
+    of the library).
+
+ -- Mark Purcell <msp@debian.org>  Thu, 29 Mar 2007 22:36:20 +0100
+
+sofia-sip (1.12.4-2) UNRELEASED; urgency=low
+
+  [ Kai Vehmanen ]
+  * Do not install addrinfo binary and man page. (Closes: #404008).
+    Next upstream release will contain a renamed binary that can
+    be added back to the package.
+
+ -- George Danchev <danchev@spnet.net>  Tue,  2 Jan 2007 18:35:32 +0200
+
+sofia-sip (1.12.4-1) unstable; urgency=high
+
+  [ Kai Vehmanen ]
+  * New upstream release (Closes: #398687).
+    For more details read
+    http://sourceforge.net/mailarchive/forum.php?thread_id=31138253&forum_id=45790
+
+ -- Kilian Krause <kilian@debian.org>  Thu, 30 Nov 2006 17:54:09 +0100
+
+sofia-sip (1.12.3-2) unstable; urgency=low
+
+  [ Rémi Denis-Courmont ]
+  * Added dependency to autotools-dev so that CDBS can update config.{guess,sub},
+    and to libc headers
+  * Fine-tuned libsofia-sip-ua-glib-dev dependencies.
+  * Added '-z defs' linker flag to verify no undefined symbols go unnoticed.
+  * Added '--as-needed' linker flag to remove extraneous .so's from list of
+    needed libraries.
+
+  [ Kai Vehmanen ]
+  * Added libssl as a build dependency. Without this, some builds will
+    have ssl disabled in the resulting packages.
+
+  [ George Danchev ]
+  * Use new variables for binNMU-safety (as of dpkg-dev >= 1.13.19)
+
+ -- Mark Purcell <msp@debian.org>  Mon,  9 Oct 2006 23:56:27 +1000
+
+sofia-sip (1.12.3-1) unstable; urgency=low
+
+  [ George Danchev ]
+  * Reuse CDBS version resolving (thanks to Jonas Smedegaard)
+  * control: XS-X-VCS-Svn: svn.debian.org/svn/pkg-voip/sofia-sip
+  * changelog: converted from ISO-8859-1 to UTF-8
+
+  [ Rémi Denis-Courmont ]
+  * Added explicit dependency between libsofia-sip-ua-glib0 and libsofia-sip-ua0.
+  * Modified rules to list installed files missing from packages.
+
+  [ Kai Vehmanen ]
+  * Updated to new upstream release (skipped 1.12.2).
+  * Removed the rfc*.txt removal rules as the new upstream package no longer
+    includes these files. Now using the upstream tarball.
+
+  [ Mark Purcell ]
+  * Section: libdevel per override disparities
+
+ -- Mark Purcell <msp@debian.org>  Wed,  4 Oct 2006 07:00:07 +1000

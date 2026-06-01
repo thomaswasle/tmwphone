@@ -1,0 +1,8 @@
+1001_fix_undefined_behaviour_accessing_msg_mclass_s_members.patch
+1002-Let-openSSL-negotiate-SSL-TLS-method.patch
+0001-cve-fix-oob-read-sip_method_d.patch
+0002-cve-fix-oob-read-url_canonize.patch
+0003-cve-fix-heap-overflow-by-two.patch
+0004-cve-check-stun-message-and-attr-len.patch
+0005-cve-dos-wrong-assert.patch
+0008-stun-add-checks-for-attribute-length-before-read-fro.patch

@@ -19,6 +19,28 @@ mod imp {
     impl ObjectImpl for App {}
 
     impl ApplicationImpl for App {
+        fn shutdown(&self) {
+            // Explicitly drop SipEngine on every MainWindow BEFORE calling
+            // parent_shutdown().  parent_shutdown() (GtkApplication::shutdown)
+            // removes windows from the application's list, so if we wait we
+            // lose access to them.  Dropping SipEngine here triggers
+            // sofia_ctx_destroy() → nua_shutdown() → REGISTER Expires:0,
+            // which tells Asterisk to remove this session's contact binding.
+            // Without this, each Ctrl+C leaves a stale binding behind;
+            // Asterisk accumulates them and eventually routes incoming calls
+            // to a dead port instead of the current one.
+            for win in self.obj().windows() {
+                if let Ok(mw) = win.downcast::<crate::window::MainWindow>() {
+                    let imp = mw.imp();
+                    if let Some(id) = imp.keepalive_timer.borrow_mut().take() {
+                        id.remove();
+                    }
+                    *imp.sip_engine.borrow_mut() = None;
+                }
+            }
+            self.parent_shutdown();
+        }
+
         fn activate(&self) {
             self.parent_activate();
             let app = self.obj();

@@ -1,0 +1,48 @@
+Description: Fix undefined behaviour accessing msg_mclass_s members
+ The original loop iterates over discrete msg_href_t members using the
+ mc_request member as a base.  But this isn't valid code, since the
+ struct may be padded between each member, and this indeed fails horribly
+ when compiled with optimisation using gcc 4.8.2-8.
+ 
+ Thanks to Radist Morse for pinning down the precise location of the buggy
+ code, and the patch posted here:
+ https://bugzilla.redhat.com/show_bug.cgi?id=981056
+Author: Ron <ron@debian.org>
+Last-Update: 2022-02-21
+---
+This patch header follows DEP-3: https://dep-team.pages.debian.net/deps/dep3/
+--- a/libsofia-sip-ua/msg/msg_parser.c
++++ b/libsofia-sip-ua/msg/msg_parser.c
+@@ -2468,8 +2468,6 @@
+ msg_header_t **
+ msg_hclass_offset(msg_mclass_t const *mc, msg_pub_t const *mo, msg_hclass_t *hc)
+ {
+-  int i;
+-
+   assert(mc && hc);
+ 
+   if (mc == NULL || hc == NULL)
+@@ -2484,9 +2482,20 @@
+   }
+   else
+     /* Header has no name. */
+-    for (i = 0; i <= 6; i++)
+-      if (hc->hc_hash == mc->mc_request[i].hr_class->hc_hash)
+-	return (msg_header_t **)((char *)mo + mc->mc_request[i].hr_offset);
++    if      (hc->hc_hash == mc->mc_request[0].hr_class->hc_hash)
++       return (msg_header_t **)((char *)mo + mc->mc_request[0].hr_offset);
++    else if (hc->hc_hash == mc->mc_status[0].hr_class->hc_hash)
++       return (msg_header_t **)((char *)mo + mc->mc_status[0].hr_offset);
++    else if (hc->hc_hash == mc->mc_separator[0].hr_class->hc_hash)
++       return (msg_header_t **)((char *)mo + mc->mc_separator[0].hr_offset);
++    else if (hc->hc_hash == mc->mc_payload[0].hr_class->hc_hash)
++       return (msg_header_t **)((char *)mo + mc->mc_payload[0].hr_offset);
++    else if (hc->hc_hash == mc->mc_unknown[0].hr_class->hc_hash)
++       return (msg_header_t **)((char *)mo + mc->mc_unknown[0].hr_offset);
++    else if (hc->hc_hash == mc->mc_error[0].hr_class->hc_hash)
++       return (msg_header_t **)((char *)mo + mc->mc_error[0].hr_offset);
++    else if (hc->hc_hash == mc->mc_multipart[0].hr_class->hc_hash)
++       return (msg_header_t **)((char *)mo + mc->mc_multipart[0].hr_offset);
+ 
+   return NULL;
+ }

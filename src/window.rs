@@ -46,8 +46,11 @@ mod imp {
         pub ringer: RefCell<Option<Ringer>>,
         /// Name/number of the primary caller, used for the "Holding: …" label.
         pub primary_caller: RefCell<String>,
-        /// Periodic registration keepalive timer (re-sends REGISTER every 2 minutes).
+        /// Watchdog timer — fires every 40 s and triggers a full reconnect if
+        /// no REGISTER 200 OK has arrived in the last 90 s.
         pub keepalive_timer: RefCell<Option<glib::SourceId>>,
+        /// Unix timestamp of the last successful REGISTER 200 OK.
+        pub last_register_ok: RefCell<Option<i64>>,
         pub call_log: RefCell<call_log::CallLog>,
         pub pending_call: RefCell<Option<PendingCall>>,
     }
@@ -318,6 +321,35 @@ mod imp {
             } else {
                 self.status_banner.set_title("Not registered — tap Configure");
             }
+
+            // Re-register whenever the network comes back up (WiFi reconnect,
+            // DHCP renewal, VPN change).  Creating a fresh SipEngine rebinds
+            // the local socket and sends a new Contact header so the server
+            // knows the current address.  We skip this during an active call
+            // to avoid dropping it; the keepalive timer covers that window.
+            let monitor = gio::NetworkMonitor::default();
+            monitor.connect_network_changed(glib::clone!(
+                #[weak]
+                obj,
+                move |_monitor, available| {
+                    if !available { return; }
+                    let imp = obj.imp();
+                    if imp.audio_session.borrow().is_some() { return; }
+                    if imp.sip_engine.borrow().is_none() { return; }
+                    // Debounce: NetworkManager emits network-changed several times
+                    // during connection establishment (link up, DHCP, connectivity
+                    // checks).  Skip if we connected or re-registered less than 30 s
+                    // ago — last_register_ok is stamped in on_connect_requested() so
+                    // this is always non-None after the first connect attempt.
+                    if imp.last_register_ok.borrow()
+                        .map(|t| now_unix() - t < 30)
+                        .unwrap_or(false)
+                    {
+                        return;
+                    }
+                    imp.on_connect_requested();
+                }
+            ));
         }
     }
 
@@ -330,6 +362,7 @@ mod imp {
         pub fn handle_sip_event(&self, event: SipEvent) {
             match event {
                 SipEvent::Registered => {
+                    *self.last_register_ok.borrow_mut() = Some(now_unix());
                     let settings = gio::Settings::new("net.loca.TMWPhone");
                     let user = settings.string("sip-username");
                     let server = settings.string("sip-server");
@@ -599,22 +632,45 @@ mod imp {
 
             *self.sip_engine.borrow_mut() = Some(engine);
 
-            // Cancel any previous keepalive timer and start a new one.
-            // Re-sends REGISTER every 2 minutes so the registration never
-            // silently expires if sofia's own refresh mechanism fails.
+            // Stamp the connect time so the watchdog doesn't fire before the
+            // first REGISTER 200 OK has had a chance to arrive.
+            *self.last_register_ok.borrow_mut() = Some(now_unix());
+
+            // Cancel any previous watchdog and start a new one.
+            // Every 40 s: if no REGISTER 200 OK has arrived in 90 s, do a
+            // full reconnect (new socket + new Contact header).  This covers
+            // silent registration expiry and broken sofia auto-refresh without
+            // the churn of hammering nua_register every few seconds.
             if let Some(id) = self.keepalive_timer.borrow_mut().take() {
                 id.remove();
             }
             let obj_weak = self.obj().downgrade();
-            let id = glib::timeout_add_seconds_local(120, move || {
-                if let Some(obj) = obj_weak.upgrade() {
-                    if let Some(engine) = obj.imp().sip_engine.borrow().as_ref() {
-                        engine.reregister();
-                    }
-                    glib::ControlFlow::Continue
-                } else {
-                    glib::ControlFlow::Break
+            let id = glib::timeout_add_seconds_local(40, move || {
+                let Some(obj) = obj_weak.upgrade() else {
+                    return glib::ControlFlow::Break;
+                };
+                let imp = obj.imp();
+
+                // Send a lightweight REGISTER refresh every 40 s.
+                // This reuses the existing socket and port so no window of
+                // unreachability is created — Asterisk keeps routing to the
+                // same Contact address throughout.
+                if let Some(engine) = imp.sip_engine.borrow().as_ref() {
+                    engine.reregister();
                 }
+
+                // Only do a full reconnect (new socket, new port) when
+                // sofia_reregister itself has been failing for a long time
+                // (180 s > ~2 expected refresh cycles for a 120 s expiry).
+                // This covers the case where the local IP actually changed
+                // and the existing socket is no longer reachable.
+                let very_stale = imp.last_register_ok.borrow()
+                    .map(|t| now_unix() - t > 180)
+                    .unwrap_or(false);
+                if very_stale && imp.audio_session.borrow().is_none() {
+                    imp.on_connect_requested();
+                }
+                glib::ControlFlow::Continue
             });
             *self.keepalive_timer.borrow_mut() = Some(id);
         }
