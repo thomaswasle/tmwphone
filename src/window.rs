@@ -362,14 +362,17 @@ mod imp {
         pub fn handle_sip_event(&self, event: SipEvent) {
             match event {
                 SipEvent::Registered => {
+                    let first_registration = self.last_register_ok.borrow().is_none();
                     *self.last_register_ok.borrow_mut() = Some(now_unix());
-                    let settings = gio::Settings::new("net.loca.TMWPhone");
-                    let user = settings.string("sip-username");
-                    let server = settings.string("sip-server");
                     self.status_banner.set_revealed(false);
-                    let toast = adw::Toast::new(&format!("Registered as {user}@{server}"));
-                    toast.set_timeout(4);
-                    self.toast_overlay.add_toast(toast);
+                    if first_registration {
+                        let settings = gio::Settings::new("net.loca.TMWPhone");
+                        let user = settings.string("sip-username");
+                        let server = settings.string("sip-server");
+                        let toast = adw::Toast::new(&format!("Registered as {user}@{server}"));
+                        toast.set_timeout(4);
+                        self.toast_overlay.add_toast(toast);
+                    }
                 }
                 SipEvent::RegistrationFailed(reason) => {
                     self.status_banner

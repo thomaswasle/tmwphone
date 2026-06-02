@@ -28,12 +28,6 @@
                         <property name="tooltip-text">Main menu</property>
                       </object>
                     </child>
-                    <child type="title">
-                      <object class="AdwViewSwitcher">
-                        <property name="stack">view_stack</property>
-                        <property name="policy">wide</property>
-                      </object>
-                    </child>
                   </object>
                 </child>
 
