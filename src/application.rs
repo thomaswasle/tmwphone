@@ -35,7 +35,7 @@ mod imp {
                     if let Some(id) = imp.keepalive_timer.borrow_mut().take() {
                         id.remove();
                     }
-                    *imp.sip_engine.borrow_mut() = None;
+                    imp.active_engines.borrow_mut().clear();
                 }
             }
             self.parent_shutdown();

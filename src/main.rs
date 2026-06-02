@@ -1,3 +1,4 @@
+mod accounts;
 mod application;
 mod audio;
 mod call_log;

@@ -10,13 +10,14 @@ fn schema() -> Schema {
     )
 }
 
-const ATTRS: [(&str, &str); 1] = [("service", "sip-account")];
 const LABEL: &str = "TMWPhone SIP password";
 
-pub fn save(password: &str) -> Result<(), glib::Error> {
+// ── Per-account API (service attribute = account ID) ─────────────────────────
+
+pub fn save_for(account_id: &str, password: &str) -> Result<(), glib::Error> {
     libsecret::password_store_sync(
         Some(&schema()),
-        HashMap::from(ATTRS),
+        HashMap::from([("service", account_id)]),
         None,
         LABEL,
         password,
@@ -24,10 +25,10 @@ pub fn save(password: &str) -> Result<(), glib::Error> {
     )
 }
 
-pub fn load() -> Option<String> {
+pub fn load_for(account_id: &str) -> Option<String> {
     libsecret::password_lookup_sync(
         Some(&schema()),
-        HashMap::from(ATTRS),
+        HashMap::from([("service", account_id)]),
         gio::Cancellable::NONE,
     )
     .ok()
@@ -35,10 +36,25 @@ pub fn load() -> Option<String> {
     .map(|s| s.to_string())
 }
 
-pub fn clear() -> Result<(), glib::Error> {
+pub fn clear_for(account_id: &str) -> Result<(), glib::Error> {
     libsecret::password_clear_sync(
         Some(&schema()),
-        HashMap::from(ATTRS),
+        HashMap::from([("service", account_id)]),
         gio::Cancellable::NONE,
     )
+}
+
+// ── Legacy single-account API (kept for migration) ───────────────────────────
+
+const LEGACY_ATTRS: [(&str, &str); 1] = [("service", "sip-account")];
+
+pub fn load() -> Option<String> {
+    libsecret::password_lookup_sync(
+        Some(&schema()),
+        HashMap::from(LEGACY_ATTRS),
+        gio::Cancellable::NONE,
+    )
+    .ok()
+    .flatten()
+    .map(|s| s.to_string())
 }

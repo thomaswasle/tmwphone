@@ -23,6 +23,15 @@ mod imp {
         pub connected_at: Option<i64>,
     }
 
+    // ── Per-account engine state ──────────────────────────────────────────────
+
+    pub struct ActiveEngine {
+        pub account_id: String,
+        pub engine: SipEngine,
+        pub registered: bool,
+        pub last_register_ok: Option<i64>,
+    }
+
     // ── Window struct ─────────────────────────────────────────────────────────
 
     #[derive(CompositeTemplate, Default)]
@@ -40,17 +49,17 @@ mod imp {
         pub dialpad: OnceCell<Dialpad>,
         pub call_screen: OnceCell<CallScreen>,
         pub call_list_box: OnceCell<gtk4::ListBox>,
-        pub sip_engine: RefCell<Option<SipEngine>>,
+
+        /// All accounts that have a running SIP engine (registered or registering).
+        pub active_engines: RefCell<Vec<ActiveEngine>>,
+        /// Which account is handling the current call.
+        pub active_account_id: RefCell<Option<String>>,
+
         pub audio_session: RefCell<Option<AudioSession>>,
         pub consult_session: RefCell<Option<AudioSession>>,
         pub ringer: RefCell<Option<Ringer>>,
-        /// Name/number of the primary caller, used for the "Holding: …" label.
         pub primary_caller: RefCell<String>,
-        /// Watchdog timer — fires every 40 s and triggers a full reconnect if
-        /// no REGISTER 200 OK has arrived in the last 90 s.
         pub keepalive_timer: RefCell<Option<glib::SourceId>>,
-        /// Unix timestamp of the last successful REGISTER 200 OK.
-        pub last_register_ok: RefCell<Option<i64>>,
         pub call_log: RefCell<call_log::CallLog>,
         pub pending_call: RefCell<Option<PendingCall>>,
     }
@@ -75,7 +84,8 @@ mod imp {
             self.parent_constructed();
             let obj = self.obj();
 
-            // Populate view stack with dialpad tab
+            // ── Dialpad tab ───────────────────────────────────────────────────
+
             let dialpad = Dialpad::new();
             self.view_stack.add_titled_with_icon(
                 &dialpad,
@@ -93,7 +103,8 @@ mod imp {
                     None,
                     move |args| {
                         let number = args[1].get::<String>().unwrap_or_default();
-                        obj.imp().start_call(&number);
+                        let account_id = args[2].get::<String>().unwrap_or_default();
+                        obj.imp().start_call(&number, &account_id);
                         None
                     }
                 ),
@@ -133,16 +144,17 @@ mod imp {
             );
             self.call_list_box.set(list_box.clone()).unwrap();
 
-            // Populate the list from persisted log (newest first = index 0 appended first)
             let log = call_log::CallLog::load();
             for record in &log.records {
                 list_box.append(&self.make_call_row(record));
             }
             *self.call_log.borrow_mut() = log;
 
-            // Attach call screen to the revealer overlay
+            // ── Call screen ───────────────────────────────────────────────────
+
             let call_screen = CallScreen::new();
             self.call_revealer.set_child(Some(&call_screen));
+
             call_screen.connect_local(
                 "answer-clicked",
                 false,
@@ -181,9 +193,7 @@ mod imp {
                     None,
                     move |args| {
                         let muted = args[1].get::<bool>().unwrap_or(false);
-                        if let Some(engine) = obj.imp().sip_engine.borrow().as_ref() {
-                            engine.set_muted(muted);
-                        }
+                        obj.imp().with_active_engine(|e| e.set_muted(muted));
                         None
                     }
                 ),
@@ -198,9 +208,7 @@ mod imp {
                     None,
                     move |args| {
                         let hold = args[1].get::<bool>().unwrap_or(false);
-                        if let Some(engine) = obj.imp().sip_engine.borrow().as_ref() {
-                            engine.set_hold(hold);
-                        }
+                        obj.imp().with_active_engine(|e| e.set_hold(hold));
                         if let Some(session) = obj.imp().audio_session.borrow().as_ref() {
                             session.set_hold(hold);
                         }
@@ -219,9 +227,7 @@ mod imp {
                     move |args| {
                         let digit_str = args[1].get::<String>().unwrap_or_default();
                         if let Some(c) = digit_str.chars().next() {
-                            if let Some(engine) = obj.imp().sip_engine.borrow().as_ref() {
-                                engine.send_dtmf(c);
-                            }
+                            obj.imp().with_active_engine(|e| e.send_dtmf(c));
                         }
                         None
                     }
@@ -237,9 +243,7 @@ mod imp {
                     None,
                     move |args| {
                         let number = args[1].get::<String>().unwrap_or_default();
-                        if let Some(engine) = obj.imp().sip_engine.borrow().as_ref() {
-                            engine.blind_transfer(&number);
-                        }
+                        obj.imp().with_active_engine(|e| e.blind_transfer(&number));
                         None
                     }
                 ),
@@ -254,9 +258,7 @@ mod imp {
                     None,
                     move |args| {
                         let number = args[1].get::<String>().unwrap_or_default();
-                        if let Some(engine) = obj.imp().sip_engine.borrow().as_ref() {
-                            engine.start_consultation(&number);
-                        }
+                        obj.imp().with_active_engine(|e| e.start_consultation(&number));
                         None
                     }
                 ),
@@ -270,9 +272,7 @@ mod imp {
                     #[upgrade_or]
                     None,
                     move |_| {
-                        if let Some(engine) = obj.imp().sip_engine.borrow().as_ref() {
-                            engine.complete_transfer();
-                        }
+                        obj.imp().with_active_engine(|e| e.complete_transfer());
                         None
                     }
                 ),
@@ -286,68 +286,85 @@ mod imp {
                     #[upgrade_or]
                     None,
                     move |_| {
-                        if let Some(engine) = obj.imp().sip_engine.borrow().as_ref() {
-                            engine.cancel_consultation();
-                        }
+                        obj.imp().with_active_engine(|e| e.cancel_consultation());
                         None
                     }
                 ),
             );
             self.call_screen.set(call_screen).unwrap();
 
-            // Banner button: "Connect" connects directly, "Configure" opens settings,
-            // "Copy" copies the error text to clipboard.
+            // ── Status banner button ──────────────────────────────────────────
+
             self.status_banner.connect_button_clicked(glib::clone!(
                 #[weak]
                 obj,
                 move |banner| {
                     match banner.button_label().as_deref() {
-                        Some("Connect") | Some("Reconnect") => {
-                            obj.imp().on_connect_requested();
-                        }
-                        _ => {
-                            obj.open_settings_dialog();
-                        }
+                        Some("Reconnect") => obj.imp().reconnect_all(),
+                        _ => obj.open_settings_dialog(),
                     }
                 }
             ));
 
-            // Auto-connect if credentials are already saved; otherwise prompt to configure.
-            let settings = gio::Settings::new("net.loca.TMWPhone");
-            let has_credentials = !settings.string("sip-username").is_empty()
-                && !settings.string("sip-server").is_empty();
-            if has_credentials {
-                self.on_connect_requested();
-            } else {
-                self.status_banner.set_title("Not registered — tap Configure");
+            // ── Auto-connect on startup ───────────────────────────────────────
+
+            let accounts = crate::accounts::load();
+
+            // Migrate password from old single-account keyring slot (one-time).
+            for acc in &accounts {
+                if crate::keyring::load_for(&acc.id).is_none() {
+                    if let Some(old_pw) = crate::keyring::load() {
+                        let _ = crate::keyring::save_for(&acc.id, &old_pw);
+                    }
+                }
             }
 
-            // Re-register whenever the network comes back up (WiFi reconnect,
-            // DHCP renewal, VPN change).  Creating a fresh SipEngine rebinds
-            // the local socket and sends a new Contact header so the server
-            // knows the current address.  We skip this during an active call
-            // to avoid dropping it; the keepalive timer covers that window.
+            let startup_accounts: Vec<_> = accounts
+                .iter()
+                .filter(|a| a.register_on_startup)
+                .collect();
+
+            if startup_accounts.is_empty() && accounts.is_empty() {
+                self.status_banner
+                    .set_title("No accounts configured — tap Configure");
+                self.status_banner.set_button_label(Some("Configure"));
+                self.status_banner.set_revealed(true);
+            } else if !startup_accounts.is_empty() {
+                self.status_banner.set_title("Registering…");
+                self.status_banner.set_button_label(None::<&str>);
+                self.status_banner.set_revealed(true);
+                for acc in &startup_accounts {
+                    self.connect_account(acc);
+                }
+            }
+
+            // ── Network reconnect ─────────────────────────────────────────────
+
             let monitor = gio::NetworkMonitor::default();
             monitor.connect_network_changed(glib::clone!(
                 #[weak]
                 obj,
                 move |_monitor, available| {
-                    if !available { return; }
-                    let imp = obj.imp();
-                    if imp.audio_session.borrow().is_some() { return; }
-                    if imp.sip_engine.borrow().is_none() { return; }
-                    // Debounce: NetworkManager emits network-changed several times
-                    // during connection establishment (link up, DHCP, connectivity
-                    // checks).  Skip if we connected or re-registered less than 30 s
-                    // ago — last_register_ok is stamped in on_connect_requested() so
-                    // this is always non-None after the first connect attempt.
-                    if imp.last_register_ok.borrow()
-                        .map(|t| now_unix() - t < 30)
-                        .unwrap_or(false)
-                    {
+                    if !available {
                         return;
                     }
-                    imp.on_connect_requested();
+                    let imp = obj.imp();
+                    if imp.audio_session.borrow().is_some() {
+                        return;
+                    }
+                    if imp.active_engines.borrow().is_empty() {
+                        return;
+                    }
+                    // Debounce: skip if any engine registered successfully in last 30 s.
+                    let recently_ok = imp
+                        .active_engines
+                        .borrow()
+                        .iter()
+                        .any(|e| e.last_register_ok.map(|t| now_unix() - t < 30).unwrap_or(false));
+                    if recently_ok {
+                        return;
+                    }
+                    imp.reconnect_all();
                 }
             ));
         }
@@ -359,28 +376,217 @@ mod imp {
     impl AdwApplicationWindowImpl for MainWindow {}
 
     impl MainWindow {
-        pub fn handle_sip_event(&self, event: SipEvent) {
-            match event {
-                SipEvent::Registered => {
-                    let first_registration = self.last_register_ok.borrow().is_none();
-                    *self.last_register_ok.borrow_mut() = Some(now_unix());
-                    self.status_banner.set_revealed(false);
-                    if first_registration {
-                        let settings = gio::Settings::new("net.loca.TMWPhone");
-                        let user = settings.string("sip-username");
-                        let server = settings.string("sip-server");
-                        let toast = adw::Toast::new(&format!("Registered as {user}@{server}"));
-                        toast.set_timeout(4);
-                        self.toast_overlay.add_toast(toast);
+        // ── Engine helpers ────────────────────────────────────────────────────
+
+        /// Call `f` with the SipEngine that owns the current call, if any.
+        fn with_active_engine<F: FnOnce(&SipEngine)>(&self, f: F) {
+            let id = match self.active_account_id.borrow().clone() {
+                Some(id) => id,
+                None => return,
+            };
+            let engines = self.active_engines.borrow();
+            if let Some(entry) = engines.iter().find(|e| e.account_id == id) {
+                f(&entry.engine);
+            }
+        }
+
+        pub fn connect_account(&self, account: &crate::accounts::Account) {
+            // Don't double-create.
+            if self
+                .active_engines
+                .borrow()
+                .iter()
+                .any(|e| e.account_id == account.id)
+            {
+                return;
+            }
+
+            let (host, port) = parse_server_field(&account.server)
+                .unwrap_or_else(|| (account.server.clone(), 5060));
+
+            if host.is_empty() {
+                return;
+            }
+
+            let account_id = account.id.clone();
+            let obj_weak = self.obj().downgrade();
+            let engine = SipEngine::new(&host, port, move |event| {
+                if let Some(obj) = obj_weak.upgrade() {
+                    obj.imp().handle_sip_event(account_id.clone(), event);
+                }
+            });
+
+            engine.register(crate::sip::SipConfig {
+                server: host,
+                username: account.username.clone(),
+                password: crate::keyring::load_for(&account.id).unwrap_or_default(),
+                display_name: account.display_name.clone(),
+                port,
+            });
+
+            self.active_engines.borrow_mut().push(ActiveEngine {
+                account_id: account.id.clone(),
+                engine,
+                registered: false,
+                last_register_ok: Some(now_unix()),
+            });
+
+            self.start_keepalive_timer();
+        }
+
+        pub fn disconnect_account(&self, account_id: &str) {
+            self.active_engines
+                .borrow_mut()
+                .retain(|e| e.account_id != account_id);
+            self.refresh_dialpad_accounts();
+        }
+
+        pub fn connect_account_by_id(&self, account_id: &str) {
+            self.disconnect_account(account_id);
+            let accounts = crate::accounts::load();
+            if let Some(acc) = accounts.iter().find(|a| a.id == account_id) {
+                self.connect_account(acc);
+            }
+        }
+
+        pub fn reconnect_all(&self) {
+            let ids: Vec<String> = self
+                .active_engines
+                .borrow()
+                .iter()
+                .map(|e| e.account_id.clone())
+                .collect();
+            self.active_engines.borrow_mut().clear();
+            let accounts = crate::accounts::load();
+            for id in ids {
+                if let Some(acc) = accounts.iter().find(|a| a.id == id) {
+                    self.connect_account(acc);
+                }
+            }
+        }
+
+        fn start_keepalive_timer(&self) {
+            if self.keepalive_timer.borrow().is_some() {
+                return;
+            }
+            let obj_weak = self.obj().downgrade();
+            let id = glib::timeout_add_seconds_local(40, move || {
+                let Some(obj) = obj_weak.upgrade() else {
+                    return glib::ControlFlow::Break;
+                };
+                let imp = obj.imp();
+
+                // Lightweight REGISTER refresh for all active engines.
+                for entry in imp.active_engines.borrow().iter() {
+                    entry.engine.reregister();
+                }
+
+                // Full reconnect for any engine that hasn't confirmed in 180 s.
+                if imp.audio_session.borrow().is_none() {
+                    let stale: Vec<String> = imp
+                        .active_engines
+                        .borrow()
+                        .iter()
+                        .filter(|e| {
+                            e.last_register_ok
+                                .map(|t| now_unix() - t > 180)
+                                .unwrap_or(false)
+                        })
+                        .map(|e| e.account_id.clone())
+                        .collect();
+                    for id in stale {
+                        imp.connect_account_by_id(&id);
                     }
                 }
+
+                glib::ControlFlow::Continue
+            });
+            *self.keepalive_timer.borrow_mut() = Some(id);
+        }
+
+        fn refresh_dialpad_accounts(&self) {
+            let Some(dialpad) = self.dialpad.get() else {
+                return;
+            };
+            let accounts = crate::accounts::load();
+            let registered: Vec<(String, String)> = self
+                .active_engines
+                .borrow()
+                .iter()
+                .filter(|e| e.registered)
+                .filter_map(|e| {
+                    accounts
+                        .iter()
+                        .find(|a| a.id == e.account_id)
+                        .map(|a| (a.id.clone(), a.label()))
+                })
+                .collect();
+            dialpad.set_registered_accounts(registered);
+        }
+
+        // ── SIP event handler ─────────────────────────────────────────────────
+
+        pub fn handle_sip_event(&self, account_id: String, event: SipEvent) {
+            match event {
+                SipEvent::Registered => {
+                    let is_first = {
+                        let mut engines = self.active_engines.borrow_mut();
+                        if let Some(entry) = engines.iter_mut().find(|e| e.account_id == account_id) {
+                            let was = entry.registered;
+                            entry.registered = true;
+                            entry.last_register_ok = Some(now_unix());
+                            !was
+                        } else {
+                            false
+                        }
+                    };
+
+                    // Hide the banner if all engines are now happy.
+                    let all_ok = self
+                        .active_engines
+                        .borrow()
+                        .iter()
+                        .all(|e| e.registered);
+                    if all_ok {
+                        self.status_banner.set_revealed(false);
+                    }
+
+                    if is_first {
+                        let accounts = crate::accounts::load();
+                        if let Some(acc) = accounts.iter().find(|a| a.id == account_id) {
+                            let toast = adw::Toast::new(&format!(
+                                "Registered as {}@{}",
+                                acc.username, acc.server
+                            ));
+                            toast.set_timeout(4);
+                            self.toast_overlay.add_toast(toast);
+                        }
+                        self.refresh_dialpad_accounts();
+                    }
+                }
+
                 SipEvent::RegistrationFailed(reason) => {
+                    {
+                        let mut engines = self.active_engines.borrow_mut();
+                        if let Some(entry) = engines.iter_mut().find(|e| e.account_id == account_id) {
+                            entry.registered = false;
+                        }
+                    }
+                    let accounts = crate::accounts::load();
+                    let label = accounts
+                        .iter()
+                        .find(|a| a.id == account_id)
+                        .map(|a| a.label())
+                        .unwrap_or_else(|| account_id.clone());
                     self.status_banner
-                        .set_title(&format!("Registration failed: {reason}"));
+                        .set_title(&format!("{label}: Registration failed: {reason}"));
                     self.status_banner.set_button_label(Some("Reconnect"));
                     self.status_banner.set_revealed(true);
+                    self.refresh_dialpad_accounts();
                 }
+
                 SipEvent::IncomingCall { from } => {
+                    *self.active_account_id.borrow_mut() = Some(account_id);
                     *self.primary_caller.borrow_mut() = from.clone();
                     if let Some(cs) = self.call_screen.get() {
                         cs.set_caller(&call_log::display_name(&from));
@@ -396,6 +602,7 @@ mod imp {
                         connected_at: None,
                     });
                 }
+
                 SipEvent::CallConnected => {
                     *self.ringer.borrow_mut() = None;
                     if let Some(cs) = self.call_screen.get() {
@@ -406,6 +613,7 @@ mod imp {
                         p.connected_at = Some(now_unix());
                     }
                 }
+
                 SipEvent::CallMedia { local_rtp_port, remote_ip, remote_rtp_port, codec } => {
                     match AudioSession::start(local_rtp_port, &remote_ip, remote_rtp_port, codec) {
                         Ok(session) => {
@@ -418,46 +626,63 @@ mod imp {
                         }
                     }
                 }
+
                 SipEvent::CallEnded => {
                     *self.ringer.borrow_mut() = None;
                     *self.audio_session.borrow_mut() = None;
                     *self.consult_session.borrow_mut() = None;
-                    if let Some(cs) = self.call_screen.get() { cs.stop_timer(); }
+                    *self.active_account_id.borrow_mut() = None;
+                    if let Some(cs) = self.call_screen.get() {
+                        cs.stop_timer();
+                    }
                     self.show_call_screen(false);
-                    if let Some(dialpad) = self.dialpad.get() { dialpad.clear(); }
+                    if let Some(dialpad) = self.dialpad.get() {
+                        dialpad.clear();
+                    }
                     self.finalize_pending_call(false);
                 }
+
                 SipEvent::CallFailed(reason) => {
                     *self.ringer.borrow_mut() = None;
                     *self.audio_session.borrow_mut() = None;
                     *self.consult_session.borrow_mut() = None;
-                    if let Some(cs) = self.call_screen.get() { cs.stop_timer(); }
+                    *self.active_account_id.borrow_mut() = None;
+                    if let Some(cs) = self.call_screen.get() {
+                        cs.stop_timer();
+                    }
                     self.show_call_screen(false);
                     self.toast_overlay
                         .add_toast(error_toast(&format!("Call failed: {reason}")));
                     self.finalize_pending_call(true);
                 }
+
                 SipEvent::TransferOk => {
                     *self.ringer.borrow_mut() = None;
                     *self.audio_session.borrow_mut() = None;
                     *self.consult_session.borrow_mut() = None;
-                    if let Some(cs) = self.call_screen.get() { cs.stop_timer(); }
+                    *self.active_account_id.borrow_mut() = None;
+                    if let Some(cs) = self.call_screen.get() {
+                        cs.stop_timer();
+                    }
                     self.show_call_screen(false);
                     self.finalize_pending_call(false);
                     let toast = adw::Toast::new("Call transferred successfully");
                     toast.set_timeout(4);
                     self.toast_overlay.add_toast(toast);
                 }
+
                 SipEvent::TransferFailed(reason) => {
                     self.toast_overlay
                         .add_toast(error_toast(&format!("Transfer failed: {reason}")));
                 }
+
                 SipEvent::ConsultConnected => {
                     let held_name = self.primary_caller.borrow().clone();
                     if let Some(cs) = self.call_screen.get() {
                         cs.enter_consult_mode(&held_name);
                     }
                 }
+
                 SipEvent::ConsultMedia { local_rtp_port, remote_ip, remote_rtp_port, codec } => {
                     match AudioSession::start(local_rtp_port, &remote_ip, remote_rtp_port, codec) {
                         Ok(session) => {
@@ -470,12 +695,12 @@ mod imp {
                         }
                     }
                 }
+
                 SipEvent::ConsultEnded => {
                     *self.consult_session.borrow_mut() = None;
                     if let Some(cs) = self.call_screen.get() {
                         cs.exit_consult_mode();
                     }
-                    // Resume primary audio (C layer already sent re-INVITE with sendrecv).
                     if let Some(session) = self.audio_session.borrow().as_ref() {
                         session.set_hold(false);
                     }
@@ -483,50 +708,73 @@ mod imp {
             }
         }
 
+        // ── Call actions ──────────────────────────────────────────────────────
+
         fn show_call_screen(&self, visible: bool) {
             self.call_revealer.set_reveal_child(visible);
             self.call_revealer.set_can_target(visible);
         }
 
-        pub fn start_call(&self, number: &str) {
-            if let Some(engine) = self.sip_engine.borrow().as_ref() {
-                *self.primary_caller.borrow_mut() = number.to_owned();
-                if let Some(cs) = self.call_screen.get() {
-                    cs.set_caller(number);
-                    cs.set_duration("Calling…");
-                    cs.show_answer_button(false);
+        pub fn start_call(&self, number: &str, account_id: &str) {
+            // Find the right engine: explicit account first, else first registered.
+            let chosen_id = {
+                let engines = self.active_engines.borrow();
+                if !account_id.is_empty() {
+                    engines
+                        .iter()
+                        .find(|e| e.account_id == account_id && e.registered)
+                        .map(|e| e.account_id.clone())
+                } else {
+                    engines
+                        .iter()
+                        .find(|e| e.registered)
+                        .map(|e| e.account_id.clone())
                 }
-                self.show_call_screen(true);
-                *self.ringer.borrow_mut() = Ringer::start_ringback();
-                *self.pending_call.borrow_mut() = Some(PendingCall {
-                    direction: call_log::Direction::Outgoing,
-                    number: number.to_owned(),
-                    started_at: now_unix(),
-                    connected_at: None,
-                });
-                engine.make_call(number);
-            } else {
-                let toast = adw::Toast::new("Not registered — configure SIP account first");
+            };
+
+            let Some(id) = chosen_id else {
+                let toast =
+                    adw::Toast::new("No registered account — configure SIP account first");
                 self.toast_overlay.add_toast(toast);
+                return;
+            };
+
+            *self.active_account_id.borrow_mut() = Some(id.clone());
+            *self.primary_caller.borrow_mut() = number.to_owned();
+            if let Some(cs) = self.call_screen.get() {
+                cs.set_caller(number);
+                cs.set_duration("Calling…");
+                cs.show_answer_button(false);
+            }
+            self.show_call_screen(true);
+            *self.ringer.borrow_mut() = Ringer::start_ringback();
+            *self.pending_call.borrow_mut() = Some(PendingCall {
+                direction: call_log::Direction::Outgoing,
+                number: number.to_owned(),
+                started_at: now_unix(),
+                connected_at: None,
+            });
+
+            let engines = self.active_engines.borrow();
+            if let Some(entry) = engines.iter().find(|e| e.account_id == id) {
+                entry.engine.make_call(number);
             }
         }
 
         fn answer_call(&self) {
-            if let Some(engine) = self.sip_engine.borrow().as_ref() {
-                engine.answer_call();
-            }
+            self.with_active_engine(|e| e.answer_call());
         }
 
         fn hangup_call(&self) {
-            if let Some(engine) = self.sip_engine.borrow().as_ref() {
-                engine.hangup();
-            }
+            self.with_active_engine(|e| e.hangup());
         }
 
-        // ── Call log helpers ─────────────────────────────────────────────────
+        // ── Call log ─────────────────────────────────────────────────────────
 
         fn finalize_pending_call(&self, outgoing_failed: bool) {
-            let Some(pending) = self.pending_call.borrow_mut().take() else { return };
+            let Some(pending) = self.pending_call.borrow_mut().take() else {
+                return;
+            };
             let now = now_unix();
             let (status, duration) = match pending.connected_at {
                 Some(t) => (call_log::Status::Answered, (now - t).max(0) as u32),
@@ -536,7 +784,7 @@ mod imp {
                     } else if outgoing_failed {
                         call_log::Status::Failed
                     } else {
-                        call_log::Status::Failed // outgoing ended before connect
+                        call_log::Status::Failed
                     };
                     (status, 0)
                 }
@@ -558,10 +806,10 @@ mod imp {
             use call_log::{Direction, Status};
 
             let (icon_name, icon_css) = match (record.direction, record.status) {
-                (Direction::Incoming, Status::Answered) => ("call-incoming-symbolic",  "success"),
-                (Direction::Incoming, _)                => ("call-missed-symbolic",    "error"),
-                (Direction::Outgoing, Status::Answered) => ("call-outgoing-symbolic",  "accent"),
-                (Direction::Outgoing, _)                => ("call-outgoing-symbolic",  "dim-label"),
+                (Direction::Incoming, Status::Answered) => ("call-incoming-symbolic", "success"),
+                (Direction::Incoming, _) => ("call-missed-symbolic", "error"),
+                (Direction::Outgoing, Status::Answered) => ("call-outgoing-symbolic", "accent"),
+                (Direction::Outgoing, _) => ("call-outgoing-symbolic", "dim-label"),
             };
 
             let icon = gtk4::Image::from_icon_name(icon_name);
@@ -571,7 +819,7 @@ mod imp {
             icon.set_margin_bottom(8);
 
             let title = call_log::display_name(&record.number);
-            let time  = call_log::format_time(record.started_at);
+            let time = call_log::format_time(record.started_at);
             let subtitle = if record.duration_secs > 0 {
                 format!("{time} · {}", call_log::format_duration(record.duration_secs))
             } else {
@@ -585,97 +833,16 @@ mod imp {
                 .build();
             row.add_prefix(&icon);
 
-            // Tap to call back
             let number = call_log::callable(&record.number);
             let weak = self.obj().downgrade();
             row.connect_activated(move |_| {
                 if let Some(obj) = weak.upgrade() {
-                    obj.imp().start_call(&number);
-                    // Switch to dialpad so the call screen is visible
+                    obj.imp().start_call(&number, "");
                     obj.imp().view_stack.set_visible_child_name("dialpad");
                 }
             });
 
             row
-        }
-
-        pub fn on_connect_requested(&self) {
-            let settings = gio::Settings::new("net.loca.TMWPhone");
-
-            // Accept "host" or "host:port" in the server field.
-            let server_raw = settings.string("sip-server").to_string();
-            let (host, port) = parse_server_field(&server_raw)
-                .unwrap_or_else(|| (server_raw.clone(), settings.int("sip-port") as u16));
-
-            if host.is_empty() {
-                let toast = adw::Toast::new("SIP server must not be empty");
-                self.toast_overlay.add_toast(toast);
-                return;
-            }
-
-            let obj = self.obj();
-            let obj_weak = obj.downgrade();
-            let engine = SipEngine::new(&host, port, move |event| {
-                if let Some(obj) = obj_weak.upgrade() {
-                    obj.imp().handle_sip_event(event);
-                }
-            });
-
-            engine.register(crate::sip::SipConfig {
-                server: host,
-                username: settings.string("sip-username").into(),
-                password: crate::keyring::load().unwrap_or_default(),
-                display_name: settings.string("sip-display-name").into(),
-                port,
-            });
-
-            self.status_banner.set_title("Registering…");
-            self.status_banner.set_button_label(None::<&str>);
-            self.status_banner.set_revealed(true);
-
-            *self.sip_engine.borrow_mut() = Some(engine);
-
-            // Stamp the connect time so the watchdog doesn't fire before the
-            // first REGISTER 200 OK has had a chance to arrive.
-            *self.last_register_ok.borrow_mut() = Some(now_unix());
-
-            // Cancel any previous watchdog and start a new one.
-            // Every 40 s: if no REGISTER 200 OK has arrived in 90 s, do a
-            // full reconnect (new socket + new Contact header).  This covers
-            // silent registration expiry and broken sofia auto-refresh without
-            // the churn of hammering nua_register every few seconds.
-            if let Some(id) = self.keepalive_timer.borrow_mut().take() {
-                id.remove();
-            }
-            let obj_weak = self.obj().downgrade();
-            let id = glib::timeout_add_seconds_local(40, move || {
-                let Some(obj) = obj_weak.upgrade() else {
-                    return glib::ControlFlow::Break;
-                };
-                let imp = obj.imp();
-
-                // Send a lightweight REGISTER refresh every 40 s.
-                // This reuses the existing socket and port so no window of
-                // unreachability is created — Asterisk keeps routing to the
-                // same Contact address throughout.
-                if let Some(engine) = imp.sip_engine.borrow().as_ref() {
-                    engine.reregister();
-                }
-
-                // Only do a full reconnect (new socket, new port) when
-                // sofia_reregister itself has been failing for a long time
-                // (180 s > ~2 expected refresh cycles for a 120 s expiry).
-                // This covers the case where the local IP actually changed
-                // and the existing socket is no longer reachable.
-                let very_stale = imp.last_register_ok.borrow()
-                    .map(|t| now_unix() - t > 180)
-                    .unwrap_or(false);
-                if very_stale && imp.audio_session.borrow().is_none() {
-                    imp.on_connect_requested();
-                }
-                glib::ControlFlow::Continue
-            });
-            *self.keepalive_timer.borrow_mut() = Some(id);
         }
     }
 }
@@ -687,8 +854,6 @@ fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
-/// Parse "host" or "host:port" from the server settings field.
-/// Returns None if the host part is empty.
 fn parse_server_field(s: &str) -> Option<(String, u16)> {
     let s = s.trim();
     if s.is_empty() {
@@ -705,8 +870,6 @@ fn parse_server_field(s: &str) -> Option<(String, u16)> {
     Some((s.to_string(), 5060))
 }
 
-/// Build an error toast with a "Copy" button that puts the message on the clipboard.
-/// The toast stays visible for 10 seconds so the user has time to click the button.
 fn error_toast(msg: &str) -> adw::Toast {
     let toast = adw::Toast::new(msg);
     toast.set_timeout(10);
@@ -735,12 +898,71 @@ impl MainWindow {
     }
 
     pub fn open_settings_dialog(&self) {
-        let dialog = SettingsDialog::new();
+        let registered_ids: Vec<String> = self
+            .imp()
+            .active_engines
+            .borrow()
+            .iter()
+            .filter(|e| e.registered)
+            .map(|e| e.account_id.clone())
+            .collect();
+
+        let dialog = SettingsDialog::new(&registered_ids);
         let win = self.clone();
-        dialog.connect_local("connect-requested", false, move |_| {
-            win.imp().on_connect_requested();
-            None
-        });
+
+        dialog.connect_local(
+            "account-register-toggled",
+            false,
+            glib::clone!(
+                #[weak]
+                win,
+                #[upgrade_or]
+                None,
+                move |args| {
+                    let account_id = args[1].get::<String>().unwrap_or_default();
+                    let should_register = args[2].get::<bool>().unwrap_or(false);
+                    if should_register {
+                        win.imp().connect_account_by_id(&account_id);
+                    } else {
+                        win.imp().disconnect_account(&account_id);
+                    }
+                    None
+                }
+            ),
+        );
+
+        dialog.connect_local(
+            "account-reconnect",
+            false,
+            glib::clone!(
+                #[weak]
+                win,
+                #[upgrade_or]
+                None,
+                move |args| {
+                    let account_id = args[1].get::<String>().unwrap_or_default();
+                    win.imp().connect_account_by_id(&account_id);
+                    None
+                }
+            ),
+        );
+
+        dialog.connect_local(
+            "account-removed",
+            false,
+            glib::clone!(
+                #[weak]
+                win,
+                #[upgrade_or]
+                None,
+                move |args| {
+                    let account_id = args[1].get::<String>().unwrap_or_default();
+                    win.imp().disconnect_account(&account_id);
+                    None
+                }
+            ),
+        );
+
         dialog.present(Some(self));
     }
 }

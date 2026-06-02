@@ -1,7 +1,9 @@
-use gtk4::{gio, glib, prelude::*, subclass::prelude::*, CompositeTemplate};
+use gtk4::{glib, prelude::*, subclass::prelude::*, CompositeTemplate};
 use libadwaita as adw;
 use adw::prelude::*;
 use adw::subclass::prelude::*;
+use std::cell::RefCell;
+use std::collections::HashSet;
 
 mod imp {
     use super::*;
@@ -11,15 +13,10 @@ mod imp {
     #[template(file = "../../data/ui/settings_dialog.ui")]
     pub struct SettingsDialog {
         #[template_child]
-        pub display_name_row: TemplateChild<adw::EntryRow>,
-        #[template_child]
-        pub username_row: TemplateChild<adw::EntryRow>,
-        #[template_child]
-        pub password_row: TemplateChild<adw::PasswordEntryRow>,
-        #[template_child]
-        pub server_row: TemplateChild<adw::EntryRow>,
-        #[template_child]
-        pub connect_row: TemplateChild<adw::ButtonRow>,
+        pub accounts_page: TemplateChild<adw::PreferencesPage>,
+
+        pub accounts_group: RefCell<Option<adw::PreferencesGroup>>,
+        pub registered_ids: RefCell<HashSet<String>>,
     }
 
     #[glib::object_subclass]
@@ -41,29 +38,22 @@ mod imp {
         fn signals() -> &'static [glib::subclass::Signal] {
             static SIGNALS: OnceLock<Vec<glib::subclass::Signal>> = OnceLock::new();
             SIGNALS.get_or_init(|| {
-                vec![glib::subclass::Signal::builder("connect-requested").build()]
+                vec![
+                    glib::subclass::Signal::builder("account-register-toggled")
+                        .param_types([String::static_type(), bool::static_type()])
+                        .build(),
+                    glib::subclass::Signal::builder("account-reconnect")
+                        .param_types([String::static_type()])
+                        .build(),
+                    glib::subclass::Signal::builder("account-removed")
+                        .param_types([String::static_type()])
+                        .build(),
+                ]
             })
         }
 
         fn constructed(&self) {
             self.parent_constructed();
-
-            let settings = gio::Settings::new("net.loca.TMWPhone");
-            self.display_name_row
-                .set_text(&settings.string("sip-display-name"));
-            self.username_row
-                .set_text(&settings.string("sip-username"));
-            self.server_row.set_text(&settings.string("sip-server"));
-            if let Some(pwd) = crate::keyring::load() {
-                self.password_row.set_text(&pwd);
-            }
-
-            let obj = self.obj();
-            self.connect_row.connect_activated(glib::clone!(
-                #[weak]
-                obj,
-                move |_| obj.imp().on_save_and_connect()
-            ));
         }
     }
 
@@ -72,23 +62,182 @@ mod imp {
     impl PreferencesDialogImpl for SettingsDialog {}
 
     impl SettingsDialog {
-        fn on_save_and_connect(&self) {
-            let settings = gio::Settings::new("net.loca.TMWPhone");
-            settings
-                .set_string("sip-display-name", &self.display_name_row.text())
-                .unwrap();
-            settings
-                .set_string("sip-username", &self.username_row.text())
-                .unwrap();
-            settings
-                .set_string("sip-server", &self.server_row.text())
-                .unwrap();
-            if let Err(e) = crate::keyring::save(&self.password_row.text()) {
-                log::warn!("keyring save failed: {e}");
+        pub fn build_accounts_ui(&self) {
+            let group = adw::PreferencesGroup::new();
+            group.set_title("SIP Accounts");
+
+            let add_btn = gtk4::Button::from_icon_name("list-add-symbolic");
+            add_btn.set_tooltip_text(Some("Add account"));
+            add_btn.add_css_class("flat");
+            group.set_header_suffix(Some(&add_btn));
+
+            for account in &crate::accounts::load() {
+                group.add(&self.make_account_row(account));
             }
 
-            self.obj().emit_by_name::<()>("connect-requested", &[]);
-            self.obj().close();
+            self.accounts_page.add(&group);
+            *self.accounts_group.borrow_mut() = Some(group);
+
+            let obj = self.obj();
+            add_btn.connect_clicked(glib::clone!(
+                #[weak]
+                obj,
+                move |_| obj.imp().add_new_account()
+            ));
+        }
+
+        pub fn make_account_row(
+            &self,
+            account: &crate::accounts::Account,
+        ) -> adw::ExpanderRow {
+            let id = account.id.clone();
+
+            let row = adw::ExpanderRow::new();
+            row.set_title(&account.label());
+            row.set_subtitle(&account.server);
+
+            // ── Suffix widgets ────────────────────────────────────────────────
+
+            let reg_switch = gtk4::Switch::new();
+            reg_switch.set_active(self.registered_ids.borrow().contains(&id));
+            reg_switch.set_valign(gtk4::Align::Center);
+            reg_switch.set_tooltip_text(Some("Register this account now"));
+            row.add_suffix(&reg_switch);
+
+            let del_btn = gtk4::Button::from_icon_name("user-trash-symbolic");
+            del_btn.add_css_class("flat");
+            del_btn.set_valign(gtk4::Align::Center);
+            del_btn.set_tooltip_text(Some("Delete account"));
+            row.add_suffix(&del_btn);
+
+            // ── Inner rows ────────────────────────────────────────────────────
+
+            let dn_row = adw::EntryRow::new();
+            dn_row.set_title("Display name");
+            dn_row.set_text(&account.display_name);
+            row.add_row(&dn_row);
+
+            let user_row = adw::EntryRow::new();
+            user_row.set_title("Username");
+            user_row.set_text(&account.username);
+            row.add_row(&user_row);
+
+            let pw_row = adw::PasswordEntryRow::new();
+            pw_row.set_title("Password");
+            if let Some(pw) = crate::keyring::load_for(&id) {
+                pw_row.set_text(&pw);
+            }
+            row.add_row(&pw_row);
+
+            let srv_row = adw::EntryRow::new();
+            srv_row.set_title("SIP server (host or host:port)");
+            srv_row.set_text(&account.server);
+            row.add_row(&srv_row);
+
+            let startup_row = adw::SwitchRow::new();
+            startup_row.set_title("Register on startup");
+            startup_row.set_active(account.register_on_startup);
+            row.add_row(&startup_row);
+
+            let save_row = adw::ButtonRow::new();
+            save_row.set_title("Save");
+            save_row.add_css_class("suggested-action");
+            row.add_row(&save_row);
+
+            // ── Signal connections ────────────────────────────────────────────
+
+            let obj = self.obj();
+
+            // Register switch: toggle live registration
+            let id2 = id.clone();
+            reg_switch.connect_state_set(glib::clone!(
+                #[weak]
+                obj,
+                #[upgrade_or]
+                glib::Propagation::Proceed,
+                move |_sw, state| {
+                    if state {
+                        obj.imp().registered_ids.borrow_mut().insert(id2.clone());
+                    } else {
+                        obj.imp().registered_ids.borrow_mut().remove(&id2);
+                    }
+                    obj.emit_by_name::<()>("account-register-toggled", &[&id2, &state]);
+                    glib::Propagation::Proceed
+                }
+            ));
+
+            // Delete button
+            let id3 = id.clone();
+            del_btn.connect_clicked(glib::clone!(
+                #[weak]
+                obj,
+                #[weak]
+                row,
+                move |_| {
+                    let mut accounts = crate::accounts::load();
+                    accounts.retain(|a| a.id != id3);
+                    crate::accounts::save(&accounts);
+                    crate::keyring::clear_for(&id3).ok();
+
+                    if let Some(group) = obj.imp().accounts_group.borrow().as_ref() {
+                        group.remove(&row);
+                    }
+                    obj.imp().registered_ids.borrow_mut().remove(&id3);
+                    obj.emit_by_name::<()>("account-removed", &[&id3]);
+                }
+            ));
+
+            // Save button
+            let id4 = id.clone();
+            save_row.connect_activated(glib::clone!(
+                #[weak]
+                obj,
+                #[weak]
+                dn_row,
+                #[weak]
+                user_row,
+                #[weak]
+                pw_row,
+                #[weak]
+                srv_row,
+                #[weak]
+                startup_row,
+                #[weak]
+                row,
+                move |_| {
+                    let mut accounts = crate::accounts::load();
+                    if let Some(acc) = accounts.iter_mut().find(|a| a.id == id4) {
+                        acc.display_name = dn_row.text().to_string();
+                        acc.username = user_row.text().to_string();
+                        acc.server = srv_row.text().to_string();
+                        acc.register_on_startup = startup_row.is_active();
+                        row.set_title(&acc.label());
+                        row.set_subtitle(&acc.server);
+                        crate::accounts::save(&accounts);
+                    }
+                    if let Err(e) = crate::keyring::save_for(&id4, &pw_row.text()) {
+                        log::warn!("keyring save failed: {e}");
+                    }
+                    if obj.imp().registered_ids.borrow().contains(&id4) {
+                        obj.emit_by_name::<()>("account-reconnect", &[&id4]);
+                    }
+                }
+            ));
+
+            row
+        }
+
+        fn add_new_account(&self) {
+            let account = crate::accounts::Account::new();
+            let mut accounts = crate::accounts::load();
+            accounts.push(account.clone());
+            crate::accounts::save(&accounts);
+
+            let row = self.make_account_row(&account);
+            if let Some(group) = self.accounts_group.borrow().as_ref() {
+                group.add(&row);
+            }
+            row.set_expanded(true);
         }
     }
 }
@@ -100,13 +249,15 @@ glib::wrapper! {
 }
 
 impl SettingsDialog {
-    pub fn new() -> Self {
-        glib::Object::new()
-    }
-}
-
-impl Default for SettingsDialog {
-    fn default() -> Self {
-        Self::new()
+    pub fn new(registered_ids: &[String]) -> Self {
+        let obj: Self = glib::Object::new();
+        {
+            let mut set = obj.imp().registered_ids.borrow_mut();
+            for id in registered_ids {
+                set.insert(id.clone());
+            }
+        }
+        obj.imp().build_accounts_ui();
+        obj
     }
 }
