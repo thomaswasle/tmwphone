@@ -7,10 +7,12 @@ A SIP softphone for the GNOME desktop, written in Rust.
 ## Features
 
 - Outgoing and incoming SIP calls
+- Multiple SIP accounts (simultaneous registration; account selector shown when more than one is active)
 - Hold / resume (re-INVITE with `a=sendonly` / `a=sendrecv`)
 - DTMF via SIP INFO (`application/dtmf-relay`)
 - Mute (local audio suppression)
 - In-call keypad
+- Dial by pressing Enter in the number field
 - Password stored in GNOME Keyring via libsecret
 - Native GNOME look using GTK4 + libadwaita
 
@@ -72,8 +74,9 @@ sudo dpkg -i ../tmwphone_*.deb
 src/
 ├── main.rs            — entry point, GSETTINGS_SCHEMA_DIR for dev builds
 ├── application.rs     — AdwApplication subclass, actions (quit, preferences, about)
-├── window.rs          — MainWindow: owns SipEngine + AudioSession, drives all state
-├── keyring.rs         — libsecret helpers (save / load SIP password)
+├── window.rs          — MainWindow: manages Vec<ActiveEngine>, drives all state
+├── accounts.rs        — Account config: load/save JSON, migrate from GSettings
+├── keyring.rs         — libsecret helpers (save / load SIP password per account)
 ├── audio.rs           — AudioSession: two GStreamer pipelines (send + recv RTP)
 ├── sip/
 │   ├── mod.rs         — SipEngine Rust wrapper, SipEvent enum, C callback bridge
@@ -81,8 +84,8 @@ src/
 │   └── glue.c         — sofia-sip NUA integration (SDP, digest auth, hold, DTMF)
 └── widgets/
     ├── call_screen.rs — overlay shown during a call (answer, hang up, mute, hold, keypad)
-    ├── dialpad.rs     — main dialler widget
-    └── settings_dialog.rs — SIP account preferences
+    ├── dialpad.rs     — main dialler; account selector DropDown; Enter key dials
+    └── settings_dialog.rs — SIP account preferences (add / edit / remove accounts)
 ```
 
 **SIP stack** — sofia-sip runs on the GLib main loop

@@ -17,6 +17,9 @@
 data/gschemas.compiled
 
 # Debian packaging
+*.deb
+*.changes
+*.buildinfo
 debian/.debhelper/
 debian/debhelper-build-stamp
 debian/files

@@ -31,13 +31,14 @@ There are no tests currently.
 ### Layer overview
 
 ```
-window.rs          — MainWindow: top-level UI orchestration, owns SipEngine + AudioSession
+window.rs          — MainWindow: top-level UI orchestration, manages Vec<ActiveEngine>
 ├── sip/mod.rs     — SipEngine: Rust wrapper around the C SIP stack
 │   ├── sip/ffi.rs — unsafe extern "C" declarations
 │   └── sip/glue.c — sofia-sip NUA integration (SIP signaling, SDP, digest auth)
 ├── audio.rs       — AudioSession: GStreamer RTP pipelines (send + recv)
 ├── ringer.rs      — Ringer: GStreamer tone-generator for incoming/ringback tones
 ├── call_log.rs    — CallLog: persistent call history (newest-first, max 500 records)
+├── accounts.rs    — Account config: load/save JSON, migrate from GSettings
 ├── keyring.rs     — libsecret wrapper for SIP password storage
 └── widgets/       — Composite GTK4 widgets (CallScreen, Dialpad, SettingsDialog)
 ```
@@ -66,6 +67,13 @@ window.rs          — MainWindow: top-level UI orchestration, owns SipEngine + 
 - RAII: `Drop` sets `alive = false` (stops the cadence loop) and sets the pipeline to `State::Null`. `MainWindow` holds `ringer: RefCell<Option<Ringer>>`; setting it to `None` stops the tone immediately.
 - Do **not** set `is-live=true` on `audiotestsrc` or `sync=false` on `autoaudiosink` — both cause glitching on a local tone generator (unlike the RTP pipelines where `sync=false` is required).
 
+### Accounts (`src/accounts.rs`)
+
+- `Account` struct fields: `id` (hex timestamp + counter), `display_name`, `username`, `server`, `register_on_startup`.
+- Persisted as JSON at `~/.local/share/tmwphone/accounts.json`. `load()` / `save()` are the only public API besides `Account::new()` and `Account::label()`.
+- On first run (no accounts.json), `migrate_from_gsettings()` reads `sip-username`, `sip-server`, `sip-display-name` from GSettings, builds a single `Account`, saves it, and returns it. The GSettings SIP keys are kept only for this one-time migration.
+- `window.rs` maintains `active_engines: RefCell<Vec<ActiveEngine>>` — one `SipEngine` per registered account, identified by `account_id`.
+
 ### Call log (`src/call_log.rs`)
 
 - `CallLog` persists call records to `~/.local/share/tmwphone/calls.log` (pipe-delimited: `timestamp|direction|status|number|duration_secs`). Newest-first; capped at 500 entries.
@@ -80,14 +88,15 @@ window.rs          — MainWindow: top-level UI orchestration, owns SipEngine + 
 
 ### UI layer
 
-- **`window.rs`** (`MainWindow`) owns `SipEngine` and `AudioSession` in `RefCell`s, connects all widget signals, and drives state transitions in response to `SipEvent`s.
+- **`window.rs`** (`MainWindow`) manages `Vec<ActiveEngine>` (one `SipEngine` per account) and one optional `AudioSession`, connects all widget signals, and drives state transitions in response to `SipEvent`s.
 - **`widgets/call_screen.rs`** (`CallScreen`) emits custom GLib signals (`answer-clicked`, `hangup-clicked`, `mute-toggled`, `hold-toggled`, `dtmf-digit`) that `MainWindow` connects to SIP/audio methods.
+- **`widgets/dialpad.rs`** (`Dialpad`) emits `call-requested(number, account_id)`. The account selector `DropDown` is hidden when only one account is registered. Pressing Enter in the number entry triggers dialling via `on_entry_activate` → `on_call_clicked_inner` (same path as the call button).
 - Each widget is a GObject subclass using `#[derive(CompositeTemplate)]` bound to a `.ui` file in `data/ui/`.
 - CSS for the call screen overlay is loaded in `application.rs` `startup()` via `gtk4::CssProvider`.
 
 ### GSettings
 
-Schema: `net.loca.TMWPhone` (`data/net.loca.TMWPhone.gschema.xml`). Keys: `sip-server`, `sip-username`, `sip-display-name`, `sip-port`, `audio-input-device` (integer, -1 = system default), `audio-output-device` (integer, -1 = system default). The SIP password is stored in the system keyring via `src/keyring.rs`, not in GSettings. Settings are read directly from `gio::Settings` in `window.rs`; the `src/config.rs` wrapper is unused.
+Schema: `net.loca.TMWPhone` (`data/net.loca.TMWPhone.gschema.xml`). Keys: `sip-server`, `sip-username`, `sip-display-name`, `sip-port` (kept only for one-time migration to `accounts.json`), `audio-input-device` (integer, -1 = system default), `audio-output-device` (integer, -1 = system default). SIP account configuration is now stored in `~/.local/share/tmwphone/accounts.json` (see Accounts section). SIP passwords are stored in the system keyring via `src/keyring.rs`. The `src/config.rs` wrapper is unused.
 
 ## Key constraints
 
