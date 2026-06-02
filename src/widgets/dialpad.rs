@@ -68,7 +68,16 @@ mod imp {
         }
 
         #[template_callback]
+        fn on_entry_activate(&self, _entry: &gtk4::Entry) {
+            self.on_call_clicked_inner();
+        }
+
+        #[template_callback]
         fn on_call_clicked(&self, _button: &gtk4::Button) {
+            self.on_call_clicked_inner();
+        }
+
+        fn on_call_clicked_inner(&self) {
             let number = self.number_entry.text().to_string();
             if number.is_empty() {
                 return;

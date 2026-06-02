@@ -28,6 +28,7 @@
             <property name="input-purpose">phone</property>
             <property name="xalign">0.5</property>
             <style><class name="title-2"/></style>
+            <signal name="activate" handler="on_entry_activate" swapped="yes"/>
           </object>
         </child>
         <child>
