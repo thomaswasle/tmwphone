@@ -94,7 +94,7 @@ mod imp {
 
             let row = adw::ExpanderRow::new();
             row.set_title(&account.label());
-            row.set_subtitle(&account.server);
+            row.set_subtitle(&format!("{}:{}", account.server, account.port));
 
             // ── Suffix widgets ────────────────────────────────────────────────
 
@@ -130,9 +130,19 @@ mod imp {
             row.add_row(&pw_row);
 
             let srv_row = adw::EntryRow::new();
-            srv_row.set_title("SIP server (host or host:port)");
+            srv_row.set_title("SIP server");
             srv_row.set_text(&account.server);
             row.add_row(&srv_row);
+
+            let port_row = adw::EntryRow::new();
+            port_row.set_title("Port");
+            port_row.set_text(&account.port.to_string());
+            row.add_row(&port_row);
+
+            let proxy_row = adw::EntryRow::new();
+            proxy_row.set_title("Outbound proxy (optional)");
+            proxy_row.set_text(&account.proxy);
+            row.add_row(&proxy_row);
 
             let startup_row = adw::SwitchRow::new();
             startup_row.set_title("Register on startup");
@@ -201,6 +211,10 @@ mod imp {
                 #[weak]
                 srv_row,
                 #[weak]
+                port_row,
+                #[weak]
+                proxy_row,
+                #[weak]
                 startup_row,
                 #[weak]
                 row,
@@ -210,9 +224,11 @@ mod imp {
                         acc.display_name = dn_row.text().to_string();
                         acc.username = user_row.text().to_string();
                         acc.server = srv_row.text().to_string();
+                        acc.port = port_row.text().to_string().parse::<u16>().unwrap_or(5060);
+                        acc.proxy = proxy_row.text().to_string();
                         acc.register_on_startup = startup_row.is_active();
                         row.set_title(&acc.label());
-                        row.set_subtitle(&acc.server);
+                        row.set_subtitle(&format!("{}:{}", acc.server, acc.port));
                         crate::accounts::save(&accounts);
                     }
                     if let Err(e) = crate::keyring::save_for(&id4, &pw_row.text()) {

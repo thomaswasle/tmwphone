@@ -8,7 +8,15 @@ pub struct Account {
     pub display_name: String,
     pub username: String,
     pub server: String,
+    #[serde(default = "default_port")]
+    pub port: u16,
+    #[serde(default)]
+    pub proxy: String,
     pub register_on_startup: bool,
+}
+
+fn default_port() -> u16 {
+    5060
 }
 
 impl Account {
@@ -42,7 +50,21 @@ pub fn load() -> Vec<Account> {
     let path = accounts_path();
     if path.exists() {
         let data = std::fs::read_to_string(&path).unwrap_or_default();
-        if let Ok(accounts) = serde_json::from_str::<Vec<Account>>(&data) {
+        if let Ok(mut accounts) = serde_json::from_str::<Vec<Account>>(&data) {
+            // Migrate old entries where port was embedded in the server field as "host:port".
+            for account in &mut accounts {
+                if account.port == 5060 {
+                    if let Some(colon) = account.server.rfind(':') {
+                        if let Ok(p) = account.server[colon + 1..].parse::<u16>() {
+                            let host = account.server[..colon].trim().to_string();
+                            if !host.is_empty() {
+                                account.server = host;
+                                account.port = p;
+                            }
+                        }
+                    }
+                }
+            }
             return accounts;
         }
     }
@@ -66,11 +88,14 @@ fn migrate_from_gsettings() -> Vec<Account> {
     if username.is_empty() || server.is_empty() {
         return vec![];
     }
+    let port = settings.int("sip-port").clamp(1, 65535) as u16;
     let account = Account {
         id: new_id(),
         display_name: settings.string("sip-display-name").to_string(),
         username,
         server,
+        port,
+        proxy: String::new(),
         register_on_startup: true,
     };
     let accounts = vec![account];

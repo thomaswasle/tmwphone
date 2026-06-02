@@ -30,6 +30,7 @@ struct SofiaCtx {
     char             *password;
     char             *server;
     int               sip_port;   /* registrar port stored for explicit re-REGISTER */
+    char             *proxy;      /* outbound proxy SIP URI, NULL if none */
     char             *auth_str;
     char             *call_to;    /* To URI of the current outgoing call */
     char              local_ip[INET_ADDRSTRLEN];
@@ -779,7 +780,7 @@ static void nua_cb(nua_event_t event, int status, char const *phrase,
 
 /* ── Public API ───────────────────────────────────────────────────────────── */
 
-SofiaCtx *sofia_ctx_create(const char *server, int port,
+SofiaCtx *sofia_ctx_create(const char *server, int port, const char *proxy,
                            sofia_event_cb_t cb, void *userdata) {
     su_init();
 
@@ -854,6 +855,16 @@ SofiaCtx *sofia_ctx_create(const char *server, int port,
         return NULL;
     }
 
+    if (proxy && *proxy) {
+        char proxy_uri[512];
+        if (strncmp(proxy, "sip:", 4) == 0 || strncmp(proxy, "sips:", 5) == 0)
+            snprintf(proxy_uri, sizeof(proxy_uri), "%s", proxy);
+        else
+            snprintf(proxy_uri, sizeof(proxy_uri), "sip:%s", proxy);
+        ctx->proxy = strdup(proxy_uri);
+        nua_set_params(ctx->nua, NUTAG_PROXY(ctx->proxy), TAG_END());
+    }
+
     return ctx;
 }
 
@@ -882,6 +893,7 @@ void sofia_ctx_destroy(SofiaCtx *ctx) {
     free(ctx->user);
     free(ctx->password);
     free(ctx->server);
+    free(ctx->proxy);
     free(ctx->auth_str);
     free(ctx->call_to);
     free(ctx->cleanup_registrar);

@@ -31,6 +31,7 @@ extern "C" {
     pub fn sofia_ctx_create(
         server: *const c_char,
         port: c_int,
+        proxy: *const c_char,
         cb: SofiaEventCb,
         userdata: *mut c_void,
     ) -> *mut SofiaCtx;

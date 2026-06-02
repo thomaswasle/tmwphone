@@ -408,27 +408,24 @@ mod imp {
                 return;
             }
 
-            let (host, port) = parse_server_field(&account.server)
-                .unwrap_or_else(|| (account.server.clone(), 5060));
-
-            if host.is_empty() {
+            if account.server.is_empty() {
                 return;
             }
 
             let account_id = account.id.clone();
             let obj_weak = self.obj().downgrade();
-            let engine = SipEngine::new(&host, port, move |event| {
+            let engine = SipEngine::new(&account.server, account.port, &account.proxy, move |event| {
                 if let Some(obj) = obj_weak.upgrade() {
                     obj.imp().handle_sip_event(account_id.clone(), event);
                 }
             });
 
             engine.register(crate::sip::SipConfig {
-                server: host,
+                server: account.server.clone(),
                 username: account.username.clone(),
                 password: crate::keyring::load_for(&account.id).unwrap_or_default(),
                 display_name: account.display_name.clone(),
-                port,
+                port: account.port,
             });
 
             self.active_engines.borrow_mut().push(ActiveEngine {
@@ -865,21 +862,6 @@ fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
-fn parse_server_field(s: &str) -> Option<(String, u16)> {
-    let s = s.trim();
-    if s.is_empty() {
-        return None;
-    }
-    if let Some(colon) = s.rfind(':') {
-        if let Ok(port) = s[colon + 1..].parse::<u16>() {
-            let host = s[..colon].trim().to_string();
-            if !host.is_empty() {
-                return Some((host, port));
-            }
-        }
-    }
-    Some((s.to_string(), 5060))
-}
 
 fn error_toast(msg: &str) -> adw::Toast {
     let toast = adw::Toast::new(msg);

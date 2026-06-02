@@ -29,8 +29,9 @@ typedef struct SofiaCtx SofiaCtx;
 
 /* Create context integrated with the current GLib main context.
    server/port are used to pick the correct local interface on multi-homed hosts.
+   proxy is an optional outbound proxy host (may be NULL or empty).
    Must be called from the GTK main thread. */
-SofiaCtx *sofia_ctx_create(const char *server, int port,
+SofiaCtx *sofia_ctx_create(const char *server, int port, const char *proxy,
                             sofia_event_cb_t cb, void *userdata);
 
 /* Destroy context.  No callbacks will fire after this returns. */
