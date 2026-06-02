@@ -349,7 +349,14 @@ mod imp {
                         return;
                     }
                     let imp = obj.imp();
+                    // Never tear down engines while a call is in progress — this
+                    // covers the auth-retry window (INVITE sent → 401 → retry
+                    // INVITE) where audio_session is still None even though
+                    // active_account_id is already set.
                     if imp.audio_session.borrow().is_some() {
+                        return;
+                    }
+                    if imp.active_account_id.borrow().is_some() {
                         return;
                     }
                     if imp.active_engines.borrow().is_empty() {
@@ -482,7 +489,11 @@ mod imp {
                 }
 
                 // Full reconnect for any engine that hasn't confirmed in 180 s.
-                if imp.audio_session.borrow().is_none() {
+                // Skip if a call is in progress (audio_session or active_account_id
+                // set) to avoid destroying the engine mid-auth-retry.
+                if imp.audio_session.borrow().is_none()
+                    && imp.active_account_id.borrow().is_none()
+                {
                     let stale: Vec<String> = imp
                         .active_engines
                         .borrow()

@@ -5,6 +5,7 @@
 #include <sofia-sip/sip_status.h>
 #include <sofia-sip/sdp.h>
 #include <sofia-sip/auth_digest.h>
+#include <stdio.h>
 
 #include <glib.h>
 #include <stdlib.h>
@@ -189,6 +190,27 @@ static void build_audio_sdp(SofiaCtx *ctx, char *buf, size_t len,
 
 /* ── Auth helpers ─────────────────────────────────────────────────────────── */
 
+/* Compute MD5(str) and write the 32-char lowercase hex result into out[33]. */
+static void md5hex(const char *str, char out[33]) {
+    char *h = g_compute_checksum_for_string(G_CHECKSUM_MD5, str, -1);
+    memcpy(out, h, 32);
+    out[32] = '\0';
+    g_free(h);
+}
+
+/* Compute Digest response = MD5(HA1:nonce:HA2) or MD5(HA1:nonce:nc:cnonce:qop:HA2).
+   ha1_hex is MD5(user:realm:password), ha2_hex is MD5(method:uri). */
+static void digest_response(const char *ha1_hex, const char *nonce,
+                             int use_qop, const char *nc, const char *cnonce,
+                             const char *ha2_hex, char out[33]) {
+    char buf[512];
+    if (use_qop)
+        snprintf(buf, sizeof(buf), "%s:%s:%s:%s:auth:%s", ha1_hex, nonce, nc, cnonce, ha2_hex);
+    else
+        snprintf(buf, sizeof(buf), "%s:%s:%s", ha1_hex, nonce, ha2_hex);
+    md5hex(buf, out);
+}
+
 static void build_auth(SofiaCtx *ctx, const char *realm) {
     char buf[1024];
     snprintf(buf, sizeof(buf), "Digest:\"%s\":%s:%s", realm, ctx->user, ctx->password);
@@ -211,6 +233,24 @@ static char *extract_realm(msg_auth_t const *auth) {
     return NULL;
 }
 
+/* Generic version: extract any named parameter from the auth header params list.
+   Returns a heap-allocated string (caller must free) or NULL if not found. */
+static char *extract_param(msg_auth_t const *auth, const char *name) {
+    if (!auth || !auth->au_params) return NULL;
+    size_t nlen = strlen(name);
+    for (int i = 0; auth->au_params[i]; i++) {
+        const char *p = auth->au_params[i];
+        if (strncmp(p, name, nlen) != 0 || p[nlen] != '=') continue;
+        p += nlen + 1;
+        if (*p == '"') p++;
+        char *val = strdup(p);
+        char *end = strchr(val, '"');
+        if (end) *end = '\0';
+        return val;
+    }
+    return NULL;
+}
+
 /* ── Digest auth (manual, bypasses nua_authenticate which is broken in
       libsofia-sip-ua 1.12.11) ─────────────────────────────────────────── */
 
@@ -218,7 +258,10 @@ static char *extract_realm(msg_auth_t const *auth) {
    Called from nua_r_invite when status is 401 or 407. */
 static void invite_with_digest(SofiaCtx *ctx, sip_t const *sip, int status)
 {
-    if (!sip) return;
+    if (!sip) {
+        ctx->cb(SOFIA_EV_CALL_FAILED, status, "No SIP message in auth challenge", NULL, ctx->userdata);
+        return;
+    }
 
     /* Only attempt auth once per call to prevent infinite retry loops. */
     if (ctx->call_auth_tried) {
@@ -231,70 +274,104 @@ static void invite_with_digest(SofiaCtx *ctx, sip_t const *sip, int status)
     msg_auth_t const *ch = (status == 401)
         ? sip->sip_www_authenticate
         : sip->sip_proxy_authenticate;
-    if (!ch || !ch->au_params) return;
+    if (!ch) {
+        ctx->cb(SOFIA_EV_CALL_FAILED, status, "Missing auth challenge header", NULL, ctx->userdata);
+        if (ctx->call_nh) { nua_handle_unref(ctx->call_nh); ctx->call_nh = NULL; }
+        return;
+    }
 
-    su_home_t home[1];
-    su_home_init(home);
+    /* Use the same manual param extraction that already works for REGISTER auth,
+       rather than auth_digest_challenge_get which has more failure modes. */
+    char *realm_str  = extract_param(ch, "realm");
+    char *nonce_str  = extract_param(ch, "nonce");
+    char *qop_str    = extract_param(ch, "qop");
+    char *opaque_str = extract_param(ch, "opaque");
 
-    auth_challenge_t ac = { sizeof(ac) };
-    auth_digest_challenge_get(home, &ac, ch->au_params);
+    const char *realm = realm_str ? realm_str : ctx->server;
+    const char *nonce = nonce_str ? nonce_str : "";
 
-    const char *realm = ac.ac_realm ? ac.ac_realm : ctx->server;
-    const char *nonce = ac.ac_nonce ? ac.ac_nonce : "";
-
-    /* Update stored realm for future operations */
     build_auth(ctx, realm);
 
-    /* Use the To URI that was set when the call was initiated — don't re-parse
-       from the 401 response where su_home ownership makes pointer lifetimes
-       tricky and produces off-by-one corruptions in url_user. */
+    /* Use the To URI saved at call initiation time. */
     const char *to_uri = ctx->call_to ? ctx->call_to : "";
     char to_hdr[520];
     snprintf(to_hdr, sizeof(to_hdr), "<%s>", to_uri);
 
-    /* Compute HA1 = MD5(user:realm:password) */
-    auth_hexmd5_t ha1, hexresp;
-    auth_digest_ha1(ha1, ctx->user, realm, ctx->password);
-
-    /* Fill response parameters; handle qop=auth if Asterisk sends it */
-    auth_response_t ar = { sizeof(ar) };
-    ar.ar_realm  = realm;
-    ar.ar_nonce  = nonce;
-    ar.ar_uri    = to_uri;
+    /* Compute Digest credentials using GLib MD5 (no dependency on sofia's
+       auth_digest_ha1 / auth_digest_response which can silently misbehave). */
     const char *cnonce = "4b6f63616c20";
     const char *nc     = "00000001";
-    if (ac.ac_auth) {
-        ar.ar_qop    = "auth";
-        ar.ar_cnonce = cnonce;
-        ar.ar_nc     = nc;
-        ar.ar_auth   = 1;
-    }
-    auth_digest_response(&ar, hexresp, ha1, "INVITE", NULL, 0);
+    int use_qop = qop_str && strcmp(qop_str, "auth") == 0;
 
-    /* Build Authorization / Proxy-Authorization header value.
-       su_home_deinit must come AFTER we're done with realm, nonce, ac.*. */
+    char ha1_input[512], ha1[33];
+    snprintf(ha1_input, sizeof(ha1_input), "%s:%s:%s", ctx->user, realm, ctx->password);
+    md5hex(ha1_input, ha1);
+
+    char ha2_input[512], ha2[33];
+    snprintf(ha2_input, sizeof(ha2_input), "INVITE:%s", to_uri);
+    md5hex(ha2_input, ha2);
+
+    char hexresp[33];
+    digest_response(ha1, nonce, use_qop, nc, cnonce, ha2, hexresp);
+
+    fprintf(stderr, "[tmwphone] INVITE auth: user=%s realm=%s nonce=%s uri=%s pw_len=%zu response=%.8s...\n",
+            ctx->user, realm, nonce, to_uri,
+            ctx->password ? strlen(ctx->password) : (size_t)0,
+            hexresp);
+    if (ctx->password && ctx->password[0] == '\0')
+        fprintf(stderr, "[tmwphone] WARNING: password is empty — did you save the account before connecting?\n");
+
     char auth_hdr[2048];
     int n = snprintf(auth_hdr, sizeof(auth_hdr),
         "Digest username=\"%s\", realm=\"%s\", nonce=\"%s\","
         " uri=\"%s\", response=\"%s\", algorithm=MD5",
         ctx->user, realm, nonce, to_uri, hexresp);
-    if (ac.ac_auth && n > 0 && n < (int)sizeof(auth_hdr))
+    if (use_qop && n > 0 && n < (int)sizeof(auth_hdr))
         n += snprintf(auth_hdr + n, sizeof(auth_hdr) - n,
             ", qop=auth, nc=%s, cnonce=\"%s\"", nc, cnonce);
-    if (ac.ac_opaque && n > 0 && n < (int)sizeof(auth_hdr))
+    if (opaque_str && n > 0 && n < (int)sizeof(auth_hdr))
         snprintf(auth_hdr + n, sizeof(auth_hdr) - n,
-            ", opaque=\"%s\"", ac.ac_opaque);
+            ", opaque=\"%s\"", opaque_str);
 
-    su_home_deinit(home);  /* ac.* pointers are invalid after this */
+    /* Preserve the Call-ID and From tag from the 401 response before destroying
+       the old handle.  Calling nua_invite on the same handle (after the 401
+       terminated its transaction) is silently dropped by sofia's NUA state
+       machine; we need a fresh handle.  But RFC 3261 §22.1 requires the retry
+       to carry the same Call-ID and From tag, otherwise Asterisk treats the
+       retry as a brand-new call and issues a fresh 401. */
+    char preserved_call_id[256] = {0};
+    char from_hdr[320];
+    if (sip && sip->sip_call_id && sip->sip_call_id->i_id)
+        snprintf(preserved_call_id, sizeof(preserved_call_id),
+                 "%s", sip->sip_call_id->i_id);
+    if (sip && sip->sip_from) {
+        sip_from_t *f = sip->sip_from;
+        const char *u = f->a_url->url_user ? f->a_url->url_user : ctx->user;
+        const char *h = f->a_url->url_host ? f->a_url->url_host : ctx->server;
+        if (f->a_tag)
+            snprintf(from_hdr, sizeof(from_hdr),
+                     "<sip:%s@%s>;tag=%s", u, h, f->a_tag);
+        else
+            snprintf(from_hdr, sizeof(from_hdr), "<sip:%s@%s>", u, h);
+    } else {
+        snprintf(from_hdr, sizeof(from_hdr),
+                 "<sip:%s@%s>", ctx->user, ctx->server);
+    }
 
-    /* New handle + fresh SDP port, re-send INVITE with credentials */
-    char from_hdr[256];
-    snprintf(from_hdr, sizeof(from_hdr), "<sip:%s@%s>", ctx->user, ctx->server);
     if (ctx->call_nh) { nua_handle_unref(ctx->call_nh); ctx->call_nh = NULL; }
-    ctx->call_nh = nua_handle(ctx->nua, NULL,
-                              SIPTAG_FROM_STR(from_hdr),
-                              SIPTAG_TO_STR(to_hdr),
-                              TAG_END());
+    if (preserved_call_id[0])
+        ctx->call_nh = nua_handle(ctx->nua, NULL,
+                                  SIPTAG_FROM_STR(from_hdr),
+                                  SIPTAG_TO_STR(to_hdr),
+                                  SIPTAG_CALL_ID_STR(preserved_call_id),
+                                  TAG_END());
+    else
+        ctx->call_nh = nua_handle(ctx->nua, NULL,
+                                  SIPTAG_FROM_STR(from_hdr),
+                                  SIPTAG_TO_STR(to_hdr),
+                                  TAG_END());
+
+    free(realm_str); free(nonce_str); free(qop_str); free(opaque_str);
 
     ctx->local_rtp_port = get_free_udp_port();
     char sdp[512];
@@ -304,13 +381,13 @@ static void invite_with_digest(SofiaCtx *ctx, sip_t const *sip, int status)
         nua_invite(ctx->call_nh,
                    SIPTAG_AUTHORIZATION_STR(auth_hdr),
                    SIPTAG_CONTENT_TYPE_STR("application/sdp"),
-               SIPTAG_PAYLOAD_STR(sdp),
+                   SIPTAG_PAYLOAD_STR(sdp),
                    TAG_END());
     else
         nua_invite(ctx->call_nh,
                    SIPTAG_PROXY_AUTHORIZATION_STR(auth_hdr),
                    SIPTAG_CONTENT_TYPE_STR("application/sdp"),
-               SIPTAG_PAYLOAD_STR(sdp),
+                   SIPTAG_PAYLOAD_STR(sdp),
                    TAG_END());
 }
 
@@ -318,7 +395,10 @@ static void invite_with_digest(SofiaCtx *ctx, sip_t const *sip, int status)
    Parallel to invite_with_digest but operates on consult_nh and consult_to. */
 static void consult_with_digest(SofiaCtx *ctx, sip_t const *sip, int status)
 {
-    if (!sip) return;
+    if (!sip) {
+        ctx->cb(SOFIA_EV_CONSULT_ENDED, status, "No SIP message in auth challenge", NULL, ctx->userdata);
+        return;
+    }
 
     /* Only attempt auth once per consultation call. */
     if (ctx->consult_auth_tried) {
@@ -331,59 +411,84 @@ static void consult_with_digest(SofiaCtx *ctx, sip_t const *sip, int status)
     msg_auth_t const *ch = (status == 401)
         ? sip->sip_www_authenticate
         : sip->sip_proxy_authenticate;
-    if (!ch || !ch->au_params) return;
+    if (!ch) {
+        ctx->cb(SOFIA_EV_CONSULT_ENDED, status, "Missing auth challenge header", NULL, ctx->userdata);
+        if (ctx->consult_nh) { nua_handle_unref(ctx->consult_nh); ctx->consult_nh = NULL; }
+        return;
+    }
 
-    su_home_t home[1];
-    su_home_init(home);
+    char *realm_str  = extract_param(ch, "realm");
+    char *nonce_str  = extract_param(ch, "nonce");
+    char *qop_str    = extract_param(ch, "qop");
+    char *opaque_str = extract_param(ch, "opaque");
 
-    auth_challenge_t ac = { sizeof(ac) };
-    auth_digest_challenge_get(home, &ac, ch->au_params);
-
-    const char *realm = ac.ac_realm ? ac.ac_realm : ctx->server;
-    const char *nonce = ac.ac_nonce ? ac.ac_nonce : "";
+    const char *realm = realm_str ? realm_str : ctx->server;
+    const char *nonce = nonce_str ? nonce_str : "";
 
     const char *to_uri = ctx->consult_to ? ctx->consult_to : "";
     char to_hdr[520];
     snprintf(to_hdr, sizeof(to_hdr), "<%s>", to_uri);
 
-    auth_hexmd5_t ha1, hexresp;
-    auth_digest_ha1(ha1, ctx->user, realm, ctx->password);
-
-    auth_response_t ar = { sizeof(ar) };
-    ar.ar_realm  = realm;
-    ar.ar_nonce  = nonce;
-    ar.ar_uri    = to_uri;
     const char *cnonce = "4b6f63616c20";
     const char *nc     = "00000001";
-    if (ac.ac_auth) {
-        ar.ar_qop    = "auth";
-        ar.ar_cnonce = cnonce;
-        ar.ar_nc     = nc;
-        ar.ar_auth   = 1;
-    }
-    auth_digest_response(&ar, hexresp, ha1, "INVITE", NULL, 0);
+    int use_qop = qop_str && strcmp(qop_str, "auth") == 0;
+
+    char ha1_input[512], ha1[33];
+    snprintf(ha1_input, sizeof(ha1_input), "%s:%s:%s", ctx->user, realm, ctx->password);
+    md5hex(ha1_input, ha1);
+
+    char ha2_input[512], ha2[33];
+    snprintf(ha2_input, sizeof(ha2_input), "INVITE:%s", to_uri);
+    md5hex(ha2_input, ha2);
+
+    char hexresp[33];
+    digest_response(ha1, nonce, use_qop, nc, cnonce, ha2, hexresp);
 
     char auth_hdr[2048];
     int n = snprintf(auth_hdr, sizeof(auth_hdr),
         "Digest username=\"%s\", realm=\"%s\", nonce=\"%s\","
         " uri=\"%s\", response=\"%s\", algorithm=MD5",
         ctx->user, realm, nonce, to_uri, hexresp);
-    if (ac.ac_auth && n > 0 && n < (int)sizeof(auth_hdr))
+    if (use_qop && n > 0 && n < (int)sizeof(auth_hdr))
         n += snprintf(auth_hdr + n, sizeof(auth_hdr) - n,
             ", qop=auth, nc=%s, cnonce=\"%s\"", nc, cnonce);
-    if (ac.ac_opaque && n > 0 && n < (int)sizeof(auth_hdr))
+    if (opaque_str && n > 0 && n < (int)sizeof(auth_hdr))
         snprintf(auth_hdr + n, sizeof(auth_hdr) - n,
-            ", opaque=\"%s\"", ac.ac_opaque);
+            ", opaque=\"%s\"", opaque_str);
 
-    su_home_deinit(home);
+    char cons_call_id[256] = {0};
+    char cons_from_hdr[320];
+    if (sip && sip->sip_call_id && sip->sip_call_id->i_id)
+        snprintf(cons_call_id, sizeof(cons_call_id),
+                 "%s", sip->sip_call_id->i_id);
+    if (sip && sip->sip_from) {
+        sip_from_t *f = sip->sip_from;
+        const char *u = f->a_url->url_user ? f->a_url->url_user : ctx->user;
+        const char *h = f->a_url->url_host ? f->a_url->url_host : ctx->server;
+        if (f->a_tag)
+            snprintf(cons_from_hdr, sizeof(cons_from_hdr),
+                     "<sip:%s@%s>;tag=%s", u, h, f->a_tag);
+        else
+            snprintf(cons_from_hdr, sizeof(cons_from_hdr), "<sip:%s@%s>", u, h);
+    } else {
+        snprintf(cons_from_hdr, sizeof(cons_from_hdr),
+                 "<sip:%s@%s>", ctx->user, ctx->server);
+    }
 
-    char from_hdr[256];
-    snprintf(from_hdr, sizeof(from_hdr), "<sip:%s@%s>", ctx->user, ctx->server);
     if (ctx->consult_nh) { nua_handle_unref(ctx->consult_nh); ctx->consult_nh = NULL; }
-    ctx->consult_nh = nua_handle(ctx->nua, NULL,
-                                  SIPTAG_FROM_STR(from_hdr),
-                                  SIPTAG_TO_STR(to_hdr),
-                                  TAG_END());
+    if (cons_call_id[0])
+        ctx->consult_nh = nua_handle(ctx->nua, NULL,
+                                      SIPTAG_FROM_STR(cons_from_hdr),
+                                      SIPTAG_TO_STR(to_hdr),
+                                      SIPTAG_CALL_ID_STR(cons_call_id),
+                                      TAG_END());
+    else
+        ctx->consult_nh = nua_handle(ctx->nua, NULL,
+                                      SIPTAG_FROM_STR(cons_from_hdr),
+                                      SIPTAG_TO_STR(to_hdr),
+                                      TAG_END());
+
+    free(realm_str); free(nonce_str); free(qop_str); free(opaque_str);
 
     ctx->consult_local_rtp_port = get_free_udp_port();
     char sdp[512];
@@ -735,6 +840,12 @@ SofiaCtx *sofia_ctx_create(const char *server, int port,
                           NUTAG_AUTOACK(0),
                           NUTAG_AUTOANSWER(0),
                           NUTAG_MEDIA_ENABLE(0),  /* manage SDP ourselves */
+                          /* Disable RFC 5626 outbound path validation.  Some
+                             Asterisk versions respond 404 to the validation
+                             probe sent to our contact address, which causes
+                             sofia to mark the registration as failed even
+                             though the REGISTER itself completed with 200 OK. */
+                          NUTAG_OUTBOUND("no-validate no-options-keepalive"),
                           TAG_END());
     if (!ctx->nua) {
         su_root_destroy(ctx->root);
