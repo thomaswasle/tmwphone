@@ -71,17 +71,29 @@ impl Drop for SipEngine {
 impl SipEngine {
     /// Create a new engine.  `on_event` will be called on the GTK main thread
     /// whenever the SIP stack fires an event (sofia runs on the GLib main loop).
-    pub fn new(server: &str, port: u16, proxy: &str, on_event: impl FnMut(SipEvent) + 'static) -> Self {
+    pub fn new(
+        server: &str,
+        port: u16,
+        proxy: &str,
+        transport: c_int,
+        tls_verify: bool,
+        tls_ca_file: &str,
+        on_event: impl FnMut(SipEvent) + 'static,
+    ) -> Self {
         // Double-box so we get a thin (data-only) pointer suitable for c_void.
         let handler: *mut HandlerBox = Box::into_raw(Box::new(Box::new(on_event)));
 
         let server_c = CString::new(server).unwrap_or_default();
         let proxy_c = CString::new(proxy).unwrap_or_default();
+        let tls_ca_c = CString::new(tls_ca_file).unwrap_or_default();
         let ctx = unsafe {
             ffi::sofia_ctx_create(
                 server_c.as_ptr(),
                 port as c_int,
                 proxy_c.as_ptr(),
+                transport,
+                tls_verify as c_int,
+                tls_ca_c.as_ptr(),
                 sofia_event_cb,
                 handler as *mut c_void,
             )

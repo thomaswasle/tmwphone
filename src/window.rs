@@ -414,11 +414,19 @@ mod imp {
 
             let account_id = account.id.clone();
             let obj_weak = self.obj().downgrade();
-            let engine = SipEngine::new(&account.server, account.port, &account.proxy, move |event| {
-                if let Some(obj) = obj_weak.upgrade() {
-                    obj.imp().handle_sip_event(account_id.clone(), event);
-                }
-            });
+            let engine = SipEngine::new(
+                &account.server,
+                account.port,
+                &account.proxy,
+                account.transport.as_c_int(),
+                account.tls_verify,
+                &account.tls_ca_file,
+                move |event| {
+                    if let Some(obj) = obj_weak.upgrade() {
+                        obj.imp().handle_sip_event(account_id.clone(), event);
+                    }
+                },
+            );
 
             engine.register(crate::sip::SipConfig {
                 server: account.server.clone(),

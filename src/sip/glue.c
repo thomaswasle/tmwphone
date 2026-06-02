@@ -5,6 +5,7 @@
 #include <sofia-sip/sip_status.h>
 #include <sofia-sip/sdp.h>
 #include <sofia-sip/auth_digest.h>
+#include <sofia-sip/tport_tag.h>
 #include <stdio.h>
 
 #include <glib.h>
@@ -30,7 +31,9 @@ struct SofiaCtx {
     char             *password;
     char             *server;
     int               sip_port;   /* registrar port stored for explicit re-REGISTER */
-    char             *proxy;      /* outbound proxy SIP URI, NULL if none */
+    char             *proxy;           /* outbound proxy SIP URI, NULL if none */
+    int               transport;       /* TRANSPORT_UDP / TCP / TLS */
+    char              tls_cert_dir[512]; /* temp dir holding cafile.pem, empty if unused */
     char             *auth_str;
     char             *call_to;    /* To URI of the current outgoing call */
     char              local_ip[INET_ADDRSTRLEN];
@@ -75,6 +78,17 @@ struct SofiaCtx {
     char             *consult_to_tag;   /* 886's tag (To) in the consult dialog */
 };
 
+/* ── Transport helpers ────────────────────────────────────────────────────── */
+
+static const char *sip_scheme(const SofiaCtx *ctx) {
+    return ctx->transport == TRANSPORT_TLS ? "sips" : "sip";
+}
+
+/* Returns ";transport=tcp" for TCP, "" for UDP and TLS (TLS uses sips: scheme). */
+static const char *transport_param(const SofiaCtx *ctx) {
+    return ctx->transport == TRANSPORT_TCP ? ";transport=tcp" : "";
+}
+
 /* ── Local-interface selection ────────────────────────────────────────────── */
 
 /* Connect a throw-away UDP socket to the destination so the kernel picks the
@@ -118,6 +132,24 @@ static int get_free_udp_port(void) {
     int port = ntohs(addr.sin_port);
     close(sock);
     return port > 0 ? port : 10000 + rand() % 10000;
+}
+
+/* Bind a TCP socket to port 0 and read back the ephemeral port assigned.
+   Used to obtain a free port for TCP/TLS NUA listeners so that the port
+   appears correctly in the Contact header (port 0 in the NUA URL causes
+   sofia-sip to omit the port from Contact). */
+static int get_free_tcp_port(void) {
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) return 5060;
+    struct sockaddr_in addr = {0};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    bind(sock, (struct sockaddr *)&addr, sizeof(addr));
+    socklen_t len = sizeof(addr);
+    getsockname(sock, (struct sockaddr *)&addr, &len);
+    int port = ntohs(addr.sin_port);
+    close(sock);
+    return port > 0 ? port : 5080;
 }
 
 /* Extract the first audio stream's connection address, port, and selected
@@ -351,12 +383,13 @@ static void invite_with_digest(SofiaCtx *ctx, sip_t const *sip, int status)
         const char *h = f->a_url->url_host ? f->a_url->url_host : ctx->server;
         if (f->a_tag)
             snprintf(from_hdr, sizeof(from_hdr),
-                     "<sip:%s@%s>;tag=%s", u, h, f->a_tag);
+                     "<%s:%s@%s>;tag=%s", sip_scheme(ctx), u, h, f->a_tag);
         else
-            snprintf(from_hdr, sizeof(from_hdr), "<sip:%s@%s>", u, h);
+            snprintf(from_hdr, sizeof(from_hdr),
+                     "<%s:%s@%s>", sip_scheme(ctx), u, h);
     } else {
         snprintf(from_hdr, sizeof(from_hdr),
-                 "<sip:%s@%s>", ctx->user, ctx->server);
+                 "<%s:%s@%s>", sip_scheme(ctx), ctx->user, ctx->server);
     }
 
     if (ctx->call_nh) { nua_handle_unref(ctx->call_nh); ctx->call_nh = NULL; }
@@ -468,12 +501,13 @@ static void consult_with_digest(SofiaCtx *ctx, sip_t const *sip, int status)
         const char *h = f->a_url->url_host ? f->a_url->url_host : ctx->server;
         if (f->a_tag)
             snprintf(cons_from_hdr, sizeof(cons_from_hdr),
-                     "<sip:%s@%s>;tag=%s", u, h, f->a_tag);
+                     "<%s:%s@%s>;tag=%s", sip_scheme(ctx), u, h, f->a_tag);
         else
-            snprintf(cons_from_hdr, sizeof(cons_from_hdr), "<sip:%s@%s>", u, h);
+            snprintf(cons_from_hdr, sizeof(cons_from_hdr),
+                     "<%s:%s@%s>", sip_scheme(ctx), u, h);
     } else {
         snprintf(cons_from_hdr, sizeof(cons_from_hdr),
-                 "<sip:%s@%s>", ctx->user, ctx->server);
+                 "<%s:%s@%s>", sip_scheme(ctx), ctx->user, ctx->server);
     }
 
     if (ctx->consult_nh) { nua_handle_unref(ctx->consult_nh); ctx->consult_nh = NULL; }
@@ -781,14 +815,16 @@ static void nua_cb(nua_event_t event, int status, char const *phrase,
 /* ── Public API ───────────────────────────────────────────────────────────── */
 
 SofiaCtx *sofia_ctx_create(const char *server, int port, const char *proxy,
+                           int transport, int tls_verify, const char *tls_ca_file,
                            sofia_event_cb_t cb, void *userdata) {
     su_init();
 
     SofiaCtx *ctx = (SofiaCtx *)calloc(1, sizeof(*ctx));
     if (!ctx) return NULL;
 
-    ctx->cb       = cb;
-    ctx->userdata = userdata;
+    ctx->cb        = cb;
+    ctx->userdata  = userdata;
+    ctx->transport = transport;
 
     /* Find which local IP the OS would use to reach the SIP server so that
        the Via/Contact headers advertise the correct address on multi-homed
@@ -797,8 +833,13 @@ SofiaCtx *sofia_ctx_create(const char *server, int port, const char *proxy,
     if (server && *server)
         get_local_ip_for(server, port, ctx->local_ip, sizeof(ctx->local_ip));
 
-    char nua_url[64];
-    snprintf(nua_url, sizeof(nua_url), "sip:%s:0", ctx->local_ip);
+    char nua_url[128];
+    if (transport == TRANSPORT_TLS)
+        snprintf(nua_url, sizeof(nua_url), "sips:%s:%d", ctx->local_ip, get_free_tcp_port());
+    else if (transport == TRANSPORT_TCP)
+        snprintf(nua_url, sizeof(nua_url), "sip:%s:%d;transport=tcp", ctx->local_ip, get_free_tcp_port());
+    else
+        snprintf(nua_url, sizeof(nua_url), "sip:%s:0", ctx->local_ip);
 
     ctx->root = su_glib_root_create(NULL);
     if (!ctx->root) {
@@ -855,10 +896,54 @@ SofiaCtx *sofia_ctx_create(const char *server, int port, const char *proxy,
         return NULL;
     }
 
+    if (transport == TRANSPORT_TLS) {
+        /* If a custom CA file is provided, copy it into a temp directory as
+           cafile.pem — the name sofia-sip expects — and point NUTAG_CERTIFICATE_DIR
+           there.  If no CA file is given and verification is requested, OpenSSL
+           falls back to the system CA store automatically. */
+        ctx->tls_cert_dir[0] = '\0';
+        if (tls_ca_file && *tls_ca_file) {
+            char tmpl[] = "/tmp/tmwphone-certs-XXXXXX";
+            if (mkdtemp(tmpl)) {
+                strncpy(ctx->tls_cert_dir, tmpl, sizeof(ctx->tls_cert_dir) - 1);
+                char dst[600];
+                snprintf(dst, sizeof(dst), "%s/cafile.pem", ctx->tls_cert_dir);
+                FILE *src_f = fopen(tls_ca_file, "rb");
+                FILE *dst_f = src_f ? fopen(dst, "wb") : NULL;
+                if (src_f && dst_f) {
+                    char buf[4096];
+                    size_t n;
+                    while ((n = fread(buf, 1, sizeof(buf), src_f)) > 0)
+                        fwrite(buf, 1, n, dst_f);
+                } else {
+                    fprintf(stderr, "[tmwphone] TLS: could not copy CA file '%s'\n",
+                            tls_ca_file);
+                    ctx->tls_cert_dir[0] = '\0';
+                }
+                if (src_f) fclose(src_f);
+                if (dst_f) fclose(dst_f);
+            }
+        }
+
+        if (ctx->tls_cert_dir[0])
+            nua_set_params(ctx->nua,
+                           NUTAG_CERTIFICATE_DIR(ctx->tls_cert_dir),
+                           TPTAG_TLS_VERIFY_PEER(tls_verify ? 1 : 0),
+                           TAG_END());
+        else
+            nua_set_params(ctx->nua,
+                           TPTAG_TLS_VERIFY_PEER(tls_verify ? 1 : 0),
+                           TAG_END());
+    }
+
     if (proxy && *proxy) {
         char proxy_uri[512];
         if (strncmp(proxy, "sip:", 4) == 0 || strncmp(proxy, "sips:", 5) == 0)
             snprintf(proxy_uri, sizeof(proxy_uri), "%s", proxy);
+        else if (transport == TRANSPORT_TLS)
+            snprintf(proxy_uri, sizeof(proxy_uri), "sips:%s", proxy);
+        else if (transport == TRANSPORT_TCP)
+            snprintf(proxy_uri, sizeof(proxy_uri), "sip:%s;transport=tcp", proxy);
         else
             snprintf(proxy_uri, sizeof(proxy_uri), "sip:%s", proxy);
         ctx->proxy = strdup(proxy_uri);
@@ -890,6 +975,13 @@ void sofia_ctx_destroy(SofiaCtx *ctx) {
     nua_destroy(ctx->nua);
     su_root_destroy(ctx->root);
 
+    if (ctx->tls_cert_dir[0]) {
+        char cafile[600];
+        snprintf(cafile, sizeof(cafile), "%s/cafile.pem", ctx->tls_cert_dir);
+        unlink(cafile);
+        rmdir(ctx->tls_cert_dir);
+    }
+
     free(ctx->user);
     free(ctx->password);
     free(ctx->server);
@@ -918,6 +1010,10 @@ void sofia_register(SofiaCtx   *ctx,
     free(ctx->server);   ctx->server   = strdup(server);
     ctx->sip_port = port;
 
+    /* Ensure the username appears in the Contact URI for all handles on this
+       NUA context (REGISTER, INVITE, etc.). */
+    nua_set_params(ctx->nua, NUTAG_M_USERNAME(ctx->user), TAG_END());
+
     /* Auth string is populated from the 401 WWW-Authenticate realm;
        pre-fill with server hostname so build_auth has a non-NULL ctx->auth_str
        before the 401 arrives.  The NUA-level NUTAG_AUTH is set in the 401
@@ -925,9 +1021,10 @@ void sofia_register(SofiaCtx   *ctx,
     build_auth(ctx, server);
 
     char registrar[512], from[512];
-    snprintf(registrar, sizeof(registrar), "sip:%s:%d", server, port);
-    snprintf(from,      sizeof(from),
-             "\"%s\" <sip:%s@%s>", display_name, user, server);
+    snprintf(registrar, sizeof(registrar), "%s:%s:%d%s",
+             sip_scheme(ctx), server, port, transport_param(ctx));
+    snprintf(from, sizeof(from),
+             "\"%s\" <%s:%s@%s>", display_name, sip_scheme(ctx), user, server);
 
     if (ctx->reg_nh) nua_handle_unref(ctx->reg_nh);
     ctx->reg_nh = nua_handle(ctx->nua, NULL,
@@ -978,8 +1075,8 @@ void sofia_call(SofiaCtx *ctx, const char *number) {
     if (strncmp(number, "sip:", 4) == 0 || strncmp(number, "sips:", 5) == 0)
         snprintf(to, sizeof(to), "%s", number);
     else
-        snprintf(to, sizeof(to), "sip:%s@%s", number, ctx->server);
-    snprintf(from, sizeof(from), "<sip:%s@%s>", ctx->user, ctx->server);
+        snprintf(to, sizeof(to), "%s:%s@%s", sip_scheme(ctx), number, ctx->server);
+    snprintf(from, sizeof(from), "<%s:%s@%s>", sip_scheme(ctx), ctx->user, ctx->server);
 
     free(ctx->call_to);
     ctx->call_to = strdup(to);   /* saved for use by invite_with_digest */
@@ -1052,7 +1149,7 @@ void sofia_blind_transfer(SofiaCtx *ctx, const char *number) {
     if (strncmp(number, "sip:", 4) == 0 || strncmp(number, "sips:", 5) == 0)
         snprintf(to, sizeof(to), "<%s>", number);
     else
-        snprintf(to, sizeof(to), "<sip:%s@%s>", number, ctx->server);
+        snprintf(to, sizeof(to), "<%s:%s@%s>", sip_scheme(ctx), number, ctx->server);
     nua_refer(ctx->call_nh, SIPTAG_REFER_TO_STR(to), TAG_END());
 }
 
@@ -1072,8 +1169,8 @@ void sofia_start_consultation(SofiaCtx *ctx, const char *number) {
     if (strncmp(number, "sip:", 4) == 0 || strncmp(number, "sips:", 5) == 0)
         snprintf(to, sizeof(to), "%s", number);
     else
-        snprintf(to, sizeof(to), "sip:%s@%s", number, ctx->server);
-    snprintf(from, sizeof(from), "<sip:%s@%s>", ctx->user, ctx->server);
+        snprintf(to, sizeof(to), "%s:%s@%s", sip_scheme(ctx), number, ctx->server);
+    snprintf(from, sizeof(from), "<%s:%s@%s>", sip_scheme(ctx), ctx->user, ctx->server);
 
     free(ctx->consult_to);
     ctx->consult_to = strdup(to);

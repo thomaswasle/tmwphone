@@ -32,6 +32,9 @@ extern "C" {
         server: *const c_char,
         port: c_int,
         proxy: *const c_char,
+        transport: c_int,
+        tls_verify: c_int,
+        tls_ca_file: *const c_char,
         cb: SofiaEventCb,
         userdata: *mut c_void,
     ) -> *mut SofiaCtx;

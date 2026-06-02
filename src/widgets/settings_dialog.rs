@@ -144,6 +144,80 @@ mod imp {
             proxy_row.set_text(&account.proxy);
             row.add_row(&proxy_row);
 
+            let transport_row = adw::ComboRow::new();
+            transport_row.set_title("Transport");
+            transport_row.set_model(Some(&gtk4::StringList::new(&["UDP", "TCP", "TLS"])));
+            let is_tls = account.transport == crate::accounts::Transport::Tls;
+            transport_row.set_selected(match account.transport {
+                crate::accounts::Transport::Udp => 0,
+                crate::accounts::Transport::Tcp => 1,
+                crate::accounts::Transport::Tls => 2,
+            });
+            row.add_row(&transport_row);
+
+            let tls_verify_row = adw::SwitchRow::new();
+            tls_verify_row.set_title("Verify TLS certificate");
+            tls_verify_row.set_active(account.tls_verify);
+            tls_verify_row.set_visible(is_tls);
+            row.add_row(&tls_verify_row);
+
+            let tls_ca_row = adw::EntryRow::new();
+            tls_ca_row.set_title("CA certificate file");
+            tls_ca_row.set_text(&account.tls_ca_file);
+            tls_ca_row.set_visible(is_tls);
+            let open_btn = gtk4::Button::from_icon_name("document-open-symbolic");
+            open_btn.add_css_class("flat");
+            open_btn.set_valign(gtk4::Align::Center);
+            open_btn.set_tooltip_text(Some("Choose CA certificate"));
+            tls_ca_row.add_suffix(&open_btn);
+            row.add_row(&tls_ca_row);
+
+            // Show/hide TLS rows when transport selection changes.
+            transport_row.connect_notify_local(
+                Some("selected"),
+                glib::clone!(
+                    #[weak] tls_verify_row,
+                    #[weak] tls_ca_row,
+                    move |combo, _| {
+                        let visible = combo.selected() == 2;
+                        tls_verify_row.set_visible(visible);
+                        tls_ca_row.set_visible(visible);
+                    }
+                ),
+            );
+
+            // File chooser for the CA certificate path.
+            open_btn.connect_clicked(glib::clone!(
+                #[weak] tls_ca_row,
+                move |btn| {
+                    let dialog = gtk4::FileDialog::new();
+                    dialog.set_title("Select CA Certificate");
+                    let filter = gtk4::FileFilter::new();
+                    filter.set_name(Some("PEM / CRT files"));
+                    filter.add_pattern("*.pem");
+                    filter.add_pattern("*.crt");
+                    filter.add_pattern("*.cer");
+                    let store = gtk4::gio::ListStore::new::<gtk4::FileFilter>();
+                    store.append(&filter);
+                    dialog.set_filters(Some(&store));
+                    let window = btn.root().and_downcast::<gtk4::Window>();
+                    dialog.open(
+                        window.as_ref(),
+                        None::<&gtk4::gio::Cancellable>,
+                        glib::clone!(
+                            #[weak] tls_ca_row,
+                            move |result| {
+                                if let Ok(file) = result {
+                                    if let Some(path) = file.path() {
+                                        tls_ca_row.set_text(&path.to_string_lossy());
+                                    }
+                                }
+                            }
+                        ),
+                    );
+                }
+            ));
+
             let startup_row = adw::SwitchRow::new();
             startup_row.set_title("Register on startup");
             startup_row.set_active(account.register_on_startup);
@@ -215,6 +289,12 @@ mod imp {
                 #[weak]
                 proxy_row,
                 #[weak]
+                transport_row,
+                #[weak]
+                tls_verify_row,
+                #[weak]
+                tls_ca_row,
+                #[weak]
                 startup_row,
                 #[weak]
                 row,
@@ -226,6 +306,13 @@ mod imp {
                         acc.server = srv_row.text().to_string();
                         acc.port = port_row.text().to_string().parse::<u16>().unwrap_or(5060);
                         acc.proxy = proxy_row.text().to_string();
+                        acc.transport = match transport_row.selected() {
+                            1 => crate::accounts::Transport::Tcp,
+                            2 => crate::accounts::Transport::Tls,
+                            _ => crate::accounts::Transport::Udp,
+                        };
+                        acc.tls_verify = tls_verify_row.is_active();
+                        acc.tls_ca_file = tls_ca_row.text().to_string();
                         acc.register_on_startup = startup_row.is_active();
                         row.set_title(&acc.label());
                         row.set_subtitle(&format!("{}:{}", acc.server, acc.port));

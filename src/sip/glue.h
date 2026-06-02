@@ -27,11 +27,21 @@ typedef void (*sofia_event_cb_t)(
 
 typedef struct SofiaCtx SofiaCtx;
 
+/* Transport constants for sofia_ctx_create(). */
+#define TRANSPORT_UDP 0
+#define TRANSPORT_TCP 1
+#define TRANSPORT_TLS 2
+
 /* Create context integrated with the current GLib main context.
-   server/port are used to pick the correct local interface on multi-homed hosts.
-   proxy is an optional outbound proxy host (may be NULL or empty).
+   server/port  — used to pick the correct local interface on multi-homed hosts.
+   proxy        — optional outbound proxy host (NULL or empty = none).
+   transport    — one of TRANSPORT_UDP / TRANSPORT_TCP / TRANSPORT_TLS.
+   tls_verify   — non-zero: verify server certificate; zero: skip verification.
+   tls_ca_file  — path to a PEM CA certificate for verification (NULL or empty
+                  = use system CA store when tls_verify is set).
    Must be called from the GTK main thread. */
 SofiaCtx *sofia_ctx_create(const char *server, int port, const char *proxy,
+                            int transport, int tls_verify, const char *tls_ca_file,
                             sofia_event_cb_t cb, void *userdata);
 
 /* Destroy context.  No callbacks will fire after this returns. */

@@ -2,6 +2,32 @@ use gtk4::{gio, prelude::SettingsExt};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Copy)]
+#[serde(rename_all = "lowercase")]
+pub enum Transport {
+    #[default]
+    Udp,
+    Tcp,
+    Tls,
+}
+
+impl Transport {
+    pub fn default_port(self) -> u16 {
+        match self {
+            Transport::Tls => 5061,
+            _ => 5060,
+        }
+    }
+
+    pub fn as_c_int(self) -> std::ffi::c_int {
+        match self {
+            Transport::Udp => 0,
+            Transport::Tcp => 1,
+            Transport::Tls => 2,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct Account {
     pub id: String,
@@ -12,6 +38,12 @@ pub struct Account {
     pub port: u16,
     #[serde(default)]
     pub proxy: String,
+    #[serde(default)]
+    pub transport: Transport,
+    #[serde(default)]
+    pub tls_verify: bool,
+    #[serde(default)]
+    pub tls_ca_file: String,
     pub register_on_startup: bool,
 }
 
@@ -96,6 +128,9 @@ fn migrate_from_gsettings() -> Vec<Account> {
         server,
         port,
         proxy: String::new(),
+        transport: Transport::Udp,
+        tls_verify: false,
+        tls_ca_file: String::new(),
         register_on_startup: true,
     };
     let accounts = vec![account];
