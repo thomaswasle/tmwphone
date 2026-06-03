@@ -57,6 +57,14 @@ mod imp {
             css.load_from_string(
                 ".call-screen {
                     background: @window_bg_color;
+                }
+                button.dialpad-key {
+                    min-width: 2.5em;
+                    min-height: 2em;
+                }
+                button.dialpad-call {
+                    min-width: 2.5em;
+                    min-height: 2.5em;
                 }",
             );
             if let Some(display) = gtk4::gdk::Display::default() {

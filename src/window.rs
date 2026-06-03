@@ -49,6 +49,7 @@ mod imp {
         pub dialpad: OnceCell<Dialpad>,
         pub call_screen: OnceCell<CallScreen>,
         pub call_list_box: OnceCell<gtk4::ListBox>,
+        pub recents_entry: OnceCell<gtk4::Entry>,
 
         /// All accounts that have a running SIP engine (registered or registering).
         pub active_engines: RefCell<Vec<ActiveEngine>>,
@@ -84,7 +85,99 @@ mod imp {
             self.parent_constructed();
             let obj = self.obj();
 
-            // ── Dialpad tab ───────────────────────────────────────────────────
+            // ── Recents tab (page 1): quick-dial entry + call log ─────────────
+
+            let recents_entry = gtk4::Entry::builder()
+                .hexpand(true)
+                .placeholder_text("Enter number…")
+                .input_purpose(gtk4::InputPurpose::Phone)
+                .xalign(0.5)
+                .build();
+            recents_entry.add_css_class("title-2");
+
+            let recents_call_btn = gtk4::Button::builder()
+                .icon_name("call-start-symbolic")
+                .tooltip_text("Call")
+                .build();
+            recents_call_btn.add_css_class("circular");
+            recents_call_btn.add_css_class("suggested-action");
+            recents_call_btn.add_css_class("dialpad-call");
+
+            let entry_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+            entry_row.set_margin_top(12);
+            entry_row.set_margin_start(12);
+            entry_row.set_margin_end(12);
+            entry_row.append(&recents_entry);
+            entry_row.append(&recents_call_btn);
+
+            recents_entry.connect_activate(glib::clone!(
+                #[weak]
+                obj,
+                move |entry| {
+                    let number = entry.text().to_string();
+                    if !number.is_empty() {
+                        obj.imp().start_call(&number, "");
+                        entry.set_text("");
+                    }
+                }
+            ));
+            recents_call_btn.connect_clicked(glib::clone!(
+                #[weak]
+                obj,
+                #[weak]
+                recents_entry,
+                move |_| {
+                    let number = recents_entry.text().to_string();
+                    if !number.is_empty() {
+                        obj.imp().start_call(&number, "");
+                        recents_entry.set_text("");
+                    }
+                }
+            ));
+
+            let list_box = gtk4::ListBox::new();
+            list_box.set_selection_mode(gtk4::SelectionMode::None);
+            list_box.add_css_class("boxed-list");
+
+            let placeholder = gtk4::Label::builder()
+                .label("No recent calls")
+                .margin_top(48)
+                .margin_bottom(48)
+                .build();
+            placeholder.add_css_class("dim-label");
+            list_box.set_placeholder(Some(&placeholder));
+
+            let recents_inner = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+            recents_inner.set_margin_top(12);
+            recents_inner.set_margin_bottom(12);
+            recents_inner.set_margin_start(12);
+            recents_inner.set_margin_end(12);
+            recents_inner.append(&list_box);
+
+            let recents_scroll = gtk4::ScrolledWindow::new();
+            recents_scroll.set_vexpand(true);
+            recents_scroll.set_child(Some(&recents_inner));
+
+            let recents_page = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+            recents_page.append(&entry_row);
+            recents_page.append(&recents_scroll);
+
+            self.view_stack.add_titled_with_icon(
+                &recents_page,
+                Some("recents"),
+                "Recents",
+                "recent-activity-symbolic",
+            );
+            self.call_list_box.set(list_box.clone()).unwrap();
+            self.recents_entry.set(recents_entry).unwrap();
+
+            let log = call_log::CallLog::load();
+            for record in &log.records {
+                list_box.append(&self.make_call_row(record));
+            }
+            *self.call_log.borrow_mut() = log;
+
+            // ── Dial tab (page 2): full dialpad ───────────────────────────────
 
             let dialpad = Dialpad::new();
             self.view_stack.add_titled_with_icon(
@@ -110,45 +203,6 @@ mod imp {
                 ),
             );
             self.dialpad.set(dialpad).unwrap();
-
-            // ── Recents tab ───────────────────────────────────────────────────
-
-            let list_box = gtk4::ListBox::new();
-            list_box.set_selection_mode(gtk4::SelectionMode::None);
-            list_box.add_css_class("boxed-list");
-
-            let placeholder = gtk4::Label::builder()
-                .label("No recent calls")
-                .margin_top(48)
-                .margin_bottom(48)
-                .build();
-            placeholder.add_css_class("dim-label");
-            list_box.set_placeholder(Some(&placeholder));
-
-            let recents_inner = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-            recents_inner.set_margin_top(12);
-            recents_inner.set_margin_bottom(12);
-            recents_inner.set_margin_start(12);
-            recents_inner.set_margin_end(12);
-            recents_inner.append(&list_box);
-
-            let recents_scroll = gtk4::ScrolledWindow::new();
-            recents_scroll.set_vexpand(true);
-            recents_scroll.set_child(Some(&recents_inner));
-
-            self.view_stack.add_titled_with_icon(
-                &recents_scroll,
-                Some("recents"),
-                "Recents",
-                "recent-activity-symbolic",
-            );
-            self.call_list_box.set(list_box.clone()).unwrap();
-
-            let log = call_log::CallLog::load();
-            for record in &log.records {
-                list_box.append(&self.make_call_row(record));
-            }
-            *self.call_log.borrow_mut() = log;
 
             // ── Call screen ───────────────────────────────────────────────────
 
@@ -655,6 +709,9 @@ mod imp {
                     if let Some(dialpad) = self.dialpad.get() {
                         dialpad.clear();
                     }
+                    if let Some(entry) = self.recents_entry.get() {
+                        entry.set_text("");
+                    }
                     self.finalize_pending_call(false);
                 }
 
@@ -854,7 +911,6 @@ mod imp {
             row.connect_activated(move |_| {
                 if let Some(obj) = weak.upgrade() {
                     obj.imp().start_call(&number, "");
-                    obj.imp().view_stack.set_visible_child_name("dialpad");
                 }
             });
 

@@ -51,24 +51,24 @@
         <property name="halign">center</property>
 
         <!-- Row 0 -->
-        <child><object class="GtkButton"><property name="label">1</property><property name="width-request">72</property><property name="height-request">56</property><signal name="clicked" handler="on_digit_clicked" swapped="yes"/><style><class name="pill"/></style><layout><property name="column">0</property><property name="row">0</property></layout></object></child>
-        <child><object class="GtkButton"><property name="label">2</property><property name="width-request">72</property><property name="height-request">56</property><signal name="clicked" handler="on_digit_clicked" swapped="yes"/><style><class name="pill"/></style><layout><property name="column">1</property><property name="row">0</property></layout></object></child>
-        <child><object class="GtkButton"><property name="label">3</property><property name="width-request">72</property><property name="height-request">56</property><signal name="clicked" handler="on_digit_clicked" swapped="yes"/><style><class name="pill"/></style><layout><property name="column">2</property><property name="row">0</property></layout></object></child>
+        <child><object class="GtkButton"><property name="label">1</property><signal name="clicked" handler="on_digit_clicked" swapped="yes"/><style><class name="pill"/><class name="dialpad-key"/></style><layout><property name="column">0</property><property name="row">0</property></layout></object></child>
+        <child><object class="GtkButton"><property name="label">2</property><signal name="clicked" handler="on_digit_clicked" swapped="yes"/><style><class name="pill"/><class name="dialpad-key"/></style><layout><property name="column">1</property><property name="row">0</property></layout></object></child>
+        <child><object class="GtkButton"><property name="label">3</property><signal name="clicked" handler="on_digit_clicked" swapped="yes"/><style><class name="pill"/><class name="dialpad-key"/></style><layout><property name="column">2</property><property name="row">0</property></layout></object></child>
 
         <!-- Row 1 -->
-        <child><object class="GtkButton"><property name="label">4</property><property name="width-request">72</property><property name="height-request">56</property><signal name="clicked" handler="on_digit_clicked" swapped="yes"/><style><class name="pill"/></style><layout><property name="column">0</property><property name="row">1</property></layout></object></child>
-        <child><object class="GtkButton"><property name="label">5</property><property name="width-request">72</property><property name="height-request">56</property><signal name="clicked" handler="on_digit_clicked" swapped="yes"/><style><class name="pill"/></style><layout><property name="column">1</property><property name="row">1</property></layout></object></child>
-        <child><object class="GtkButton"><property name="label">6</property><property name="width-request">72</property><property name="height-request">56</property><signal name="clicked" handler="on_digit_clicked" swapped="yes"/><style><class name="pill"/></style><layout><property name="column">2</property><property name="row">1</property></layout></object></child>
+        <child><object class="GtkButton"><property name="label">4</property><signal name="clicked" handler="on_digit_clicked" swapped="yes"/><style><class name="pill"/><class name="dialpad-key"/></style><layout><property name="column">0</property><property name="row">1</property></layout></object></child>
+        <child><object class="GtkButton"><property name="label">5</property><signal name="clicked" handler="on_digit_clicked" swapped="yes"/><style><class name="pill"/><class name="dialpad-key"/></style><layout><property name="column">1</property><property name="row">1</property></layout></object></child>
+        <child><object class="GtkButton"><property name="label">6</property><signal name="clicked" handler="on_digit_clicked" swapped="yes"/><style><class name="pill"/><class name="dialpad-key"/></style><layout><property name="column">2</property><property name="row">1</property></layout></object></child>
 
         <!-- Row 2 -->
-        <child><object class="GtkButton"><property name="label">7</property><property name="width-request">72</property><property name="height-request">56</property><signal name="clicked" handler="on_digit_clicked" swapped="yes"/><style><class name="pill"/></style><layout><property name="column">0</property><property name="row">2</property></layout></object></child>
-        <child><object class="GtkButton"><property name="label">8</property><property name="width-request">72</property><property name="height-request">56</property><signal name="clicked" handler="on_digit_clicked" swapped="yes"/><style><class name="pill"/></style><layout><property name="column">1</property><property name="row">2</property></layout></object></child>
-        <child><object class="GtkButton"><property name="label">9</property><property name="width-request">72</property><property name="height-request">56</property><signal name="clicked" handler="on_digit_clicked" swapped="yes"/><style><class name="pill"/></style><layout><property name="column">2</property><property name="row">2</property></layout></object></child>
+        <child><object class="GtkButton"><property name="label">7</property><signal name="clicked" handler="on_digit_clicked" swapped="yes"/><style><class name="pill"/><class name="dialpad-key"/></style><layout><property name="column">0</property><property name="row">2</property></layout></object></child>
+        <child><object class="GtkButton"><property name="label">8</property><signal name="clicked" handler="on_digit_clicked" swapped="yes"/><style><class name="pill"/><class name="dialpad-key"/></style><layout><property name="column">1</property><property name="row">2</property></layout></object></child>
+        <child><object class="GtkButton"><property name="label">9</property><signal name="clicked" handler="on_digit_clicked" swapped="yes"/><style><class name="pill"/><class name="dialpad-key"/></style><layout><property name="column">2</property><property name="row">2</property></layout></object></child>
 
         <!-- Row 3 -->
-        <child><object class="GtkButton"><property name="label">*</property><property name="width-request">72</property><property name="height-request">56</property><signal name="clicked" handler="on_digit_clicked" swapped="yes"/><style><class name="pill"/></style><layout><property name="column">0</property><property name="row">3</property></layout></object></child>
-        <child><object class="GtkButton"><property name="label">0</property><property name="width-request">72</property><property name="height-request">56</property><signal name="clicked" handler="on_digit_clicked" swapped="yes"/><style><class name="pill"/></style><layout><property name="column">1</property><property name="row">3</property></layout></object></child>
-        <child><object class="GtkButton"><property name="label">#</property><property name="width-request">72</property><property name="height-request">56</property><signal name="clicked" handler="on_digit_clicked" swapped="yes"/><style><class name="pill"/></style><layout><property name="column">2</property><property name="row">3</property></layout></object></child>
+        <child><object class="GtkButton"><property name="label">*</property><signal name="clicked" handler="on_digit_clicked" swapped="yes"/><style><class name="pill"/><class name="dialpad-key"/></style><layout><property name="column">0</property><property name="row">3</property></layout></object></child>
+        <child><object class="GtkButton"><property name="label">0</property><signal name="clicked" handler="on_digit_clicked" swapped="yes"/><style><class name="pill"/><class name="dialpad-key"/></style><layout><property name="column">1</property><property name="row">3</property></layout></object></child>
+        <child><object class="GtkButton"><property name="label">#</property><signal name="clicked" handler="on_digit_clicked" swapped="yes"/><style><class name="pill"/><class name="dialpad-key"/></style><layout><property name="column">2</property><property name="row">3</property></layout></object></child>
       </object>
     </child>
 
@@ -77,13 +77,12 @@
       <object class="GtkButton" id="call_button">
         <property name="icon-name">call-start-symbolic</property>
         <property name="halign">center</property>
-        <property name="width-request">72</property>
-        <property name="height-request">72</property>
         <property name="tooltip-text">Call</property>
         <signal name="clicked" handler="on_call_clicked" swapped="yes"/>
         <style>
           <class name="circular"/>
           <class name="suggested-action"/>
+          <class name="dialpad-call"/>
         </style>
       </object>
     </child>
