@@ -47,9 +47,12 @@ window.rs          — MainWindow: top-level UI orchestration, manages Vec<Activ
 
 - **`glue.c`** is the only place that touches sofia-sip. It manages a `SofiaCtx` struct and fires simple integer events (`SOFIA_EV_*`) to Rust via a C callback.
 - The NUA stack runs on the GLib main loop (`su_glib_root_create` + `g_source_attach`), so all `sofia_event_cb` invocations arrive on the GTK main thread.
+- Transport (UDP / TCP / TLS), outbound proxy, server port, and TLS options are set at context creation time via `sofia_ctx_create()` and cannot be changed without destroying and recreating the engine.
+- For TLS, the `tls_verify` flag controls certificate verification; `tls_ca_file` (if non-empty) overrides the system CA store.
 - SDP is built and parsed manually (`build_audio_sdp`, `extract_rtp_from_sip`) — `NUTAG_MEDIA_ENABLE(0)` disables sofia's own SDP handling.
 - Digest auth for INVITE is done manually (`invite_with_digest`) because `nua_authenticate` is broken in libsofia-sip-ua 1.12.11.
 - DTMF is sent via SIP INFO (`application/dtmf-relay`), not RFC 2833 RTP.
+- Blind transfer uses SIP REFER (`sofia_blind_transfer`). Attended transfer works via a consultation call: `sofia_start_consultation` puts the primary call on hold and dials a second leg; `sofia_complete_transfer` issues REFER to connect the two parties; `sofia_cancel_consultation` hangs up the consult leg and resumes the held call. Consultation events (`SOFIA_EV_CONSULT_*`) mirror the primary call events.
 - **`mod.rs`** converts C events into `SipEvent` enum values and invokes a closure directly on the GTK main thread (sofia NUA callbacks arrive on the main thread via the GLib event loop).
 
 ### Audio layer (`src/audio.rs`)
@@ -69,9 +72,11 @@ window.rs          — MainWindow: top-level UI orchestration, manages Vec<Activ
 
 ### Accounts (`src/accounts.rs`)
 
-- `Account` struct fields: `id` (hex timestamp + counter), `display_name`, `username`, `server`, `register_on_startup`.
+- `Account` struct fields: `id` (hex timestamp + counter), `display_name`, `username`, `server`, `port` (u16, default 5060), `proxy` (outbound proxy host, empty = none), `transport` (`Transport` enum: `Udp` / `Tcp` / `Tls`, default `Udp`), `tls_verify` (bool), `tls_ca_file` (path to PEM CA, used when `tls_verify` is true and `transport == Tls`), `register_on_startup`.
+- `Transport::default_port()` returns 5061 for TLS, 5060 otherwise. `Transport::as_c_int()` maps to the `TRANSPORT_*` constants in `glue.h`.
 - Persisted as JSON at `~/.local/share/tmwphone/accounts.json`. `load()` / `save()` are the only public API besides `Account::new()` and `Account::label()`.
-- On first run (no accounts.json), `migrate_from_gsettings()` reads `sip-username`, `sip-server`, `sip-display-name` from GSettings, builds a single `Account`, saves it, and returns it. The GSettings SIP keys are kept only for this one-time migration.
+- `load()` includes a migration path for old entries where `port` was embedded in `server` as `"host:port"` — it splits them on the first load.
+- On first run (no accounts.json), `migrate_from_gsettings()` reads `sip-username`, `sip-server`, `sip-display-name`, `sip-port` from GSettings, builds a single `Account`, saves it, and returns it. The GSettings SIP keys are kept only for this one-time migration.
 - `window.rs` maintains `active_engines: RefCell<Vec<ActiveEngine>>` — one `SipEngine` per registered account, identified by `account_id`.
 
 ### Call log (`src/call_log.rs`)
@@ -88,15 +93,15 @@ window.rs          — MainWindow: top-level UI orchestration, manages Vec<Activ
 
 ### UI layer
 
-- **`window.rs`** (`MainWindow`) manages `Vec<ActiveEngine>` (one `SipEngine` per account) and one optional `AudioSession`, connects all widget signals, and drives state transitions in response to `SipEvent`s.
-- **`widgets/call_screen.rs`** (`CallScreen`) emits custom GLib signals (`answer-clicked`, `hangup-clicked`, `mute-toggled`, `hold-toggled`, `dtmf-digit`) that `MainWindow` connects to SIP/audio methods.
+- **`window.rs`** (`MainWindow`) manages `Vec<ActiveEngine>` (one `SipEngine` per account), one optional `AudioSession` for the primary call, and one optional `consult_session: RefCell<Option<AudioSession>>` for the consultation leg during attended transfer.
+- **`widgets/call_screen.rs`** (`CallScreen`) emits custom GLib signals: `answer-clicked`, `hangup-clicked`, `mute-toggled`, `hold-toggled`, `dtmf-digit`; and transfer/consultation signals: `transfer-blind-requested(number)`, `consult-requested(number)`, `transfer-complete-requested`, `consult-cancel-requested`. The transfer UI (entry + blind/consult buttons) is revealed by a `transfer_button` toggle; `consult_revealer` shows complete/cancel buttons during a live consultation.
 - **`widgets/dialpad.rs`** (`Dialpad`) emits `call-requested(number, account_id)`. The account selector `DropDown` is hidden when only one account is registered. Pressing Enter in the number entry triggers dialling via `on_entry_activate` → `on_call_clicked_inner` (same path as the call button).
 - Each widget is a GObject subclass using `#[derive(CompositeTemplate)]` bound to a `.ui` file in `data/ui/`.
 - CSS for the call screen overlay is loaded in `application.rs` `startup()` via `gtk4::CssProvider`.
 
 ### GSettings
 
-Schema: `net.loca.TMWPhone` (`data/net.loca.TMWPhone.gschema.xml`). Keys: `sip-server`, `sip-username`, `sip-display-name`, `sip-port` (kept only for one-time migration to `accounts.json`), `audio-input-device` (integer, -1 = system default), `audio-output-device` (integer, -1 = system default). SIP account configuration is now stored in `~/.local/share/tmwphone/accounts.json` (see Accounts section). SIP passwords are stored in the system keyring via `src/keyring.rs`. The `src/config.rs` wrapper is unused.
+Schema: `net.loca.TMWPhone` (`data/net.loca.TMWPhone.gschema.xml`). Keys: `sip-server`, `sip-username`, `sip-display-name`, `sip-port` (all kept only for one-time migration to `accounts.json`), `audio-input-device` (integer, -1 = system default), `audio-output-device` (integer, -1 = system default). SIP account configuration is now stored in `~/.local/share/tmwphone/accounts.json` (see Accounts section). SIP passwords are stored in the system keyring via `src/keyring.rs`. The `src/config.rs` wrapper is unused.
 
 ## Key constraints
 

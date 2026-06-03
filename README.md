@@ -8,7 +8,12 @@ A SIP softphone for the GNOME desktop, written in Rust.
 
 - Outgoing and incoming SIP calls
 - Multiple SIP accounts (simultaneous registration; account selector shown when more than one is active)
+- UDP, TCP, and TLS transport (per account)
+- Configurable server port and outbound proxy (per account)
+- TLS certificate verification with optional custom CA file
 - Hold / resume (re-INVITE with `a=sendonly` / `a=sendrecv`)
+- Blind transfer (SIP REFER)
+- Attended transfer via consultation call (hold + dial, then complete or cancel)
 - DTMF via SIP INFO (`application/dtmf-relay`)
 - Mute (local audio suppression)
 - In-call keypad
@@ -93,6 +98,9 @@ src/
 GTK main thread. SDP is built and parsed manually; sofia's own media handling
 is disabled (`NUTAG_MEDIA_ENABLE(0)`). Digest auth for INVITE is implemented
 manually because `nua_authenticate` is broken in libsofia-sip-ua 1.12.11.
+Transport (UDP/TCP/TLS), outbound proxy, port, and TLS options are set at
+engine creation and require an engine restart to change. Blind and attended
+transfer are implemented via SIP REFER / consultation INVITE.
 
 **Audio** — The receive pipeline (`udpsrc`) is brought to `State::Ready` first
 to bind the local UDP socket; that socket is then shared with `udpsink` in the
