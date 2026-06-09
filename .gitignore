@@ -16,6 +16,12 @@
 *.d
 data/gschemas.compiled
 
+# Arch packaging
+pkg/
+src/
+*.pkg.tar.*
+*.log
+
 # Debian packaging
 *.deb
 *.changes
