@@ -137,7 +137,7 @@ static int get_free_udp_port(void) {
 /* Bind a TCP socket to port 0 and read back the ephemeral port assigned.
    Used to obtain a free port for TCP/TLS NUA listeners so that the port
    appears correctly in the Contact header (port 0 in the NUA URL causes
-   sofia-sip to omit the port from Contact). */
+   sofia-sip 1.13+ to omit the Contact header entirely from INVITE). */
 static int get_free_tcp_port(void) {
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) return 5060;
@@ -839,7 +839,7 @@ SofiaCtx *sofia_ctx_create(const char *server, int port, const char *proxy,
     else if (transport == TRANSPORT_TCP)
         snprintf(nua_url, sizeof(nua_url), "sip:%s:%d;transport=tcp", ctx->local_ip, get_free_tcp_port());
     else
-        snprintf(nua_url, sizeof(nua_url), "sip:%s:0", ctx->local_ip);
+        snprintf(nua_url, sizeof(nua_url), "sip:%s:%d", ctx->local_ip, get_free_udp_port());
 
     ctx->root = su_glib_root_create(NULL);
     if (!ctx->root) {
