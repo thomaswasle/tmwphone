@@ -305,8 +305,8 @@ static void invite_with_digest(SofiaCtx *ctx, sip_t const *sip, int status)
     ctx->call_auth_tried = TRUE;
 
     msg_auth_t const *ch = (status == 401)
-        ? sip->sip_www_authenticate
-        : sip->sip_proxy_authenticate;
+    ? sip->sip_www_authenticate
+    : sip->sip_proxy_authenticate;
     if (!ch) {
         ctx->cb(SOFIA_EV_CALL_FAILED, status, "Missing auth challenge header", NULL, ctx->userdata);
         if (ctx->call_nh) { nua_handle_unref(ctx->call_nh); ctx->call_nh = NULL; }
@@ -314,7 +314,7 @@ static void invite_with_digest(SofiaCtx *ctx, sip_t const *sip, int status)
     }
 
     /* Use the same manual param extraction that already works for REGISTER auth,
-       rather than auth_digest_challenge_get which has more failure modes. */
+     *      rather than auth_digest_challenge_get which has more failure modes. */
     char *realm_str  = extract_param(ch, "realm");
     char *nonce_str  = extract_param(ch, "nonce");
     char *qop_str    = extract_param(ch, "qop");
@@ -331,7 +331,7 @@ static void invite_with_digest(SofiaCtx *ctx, sip_t const *sip, int status)
     snprintf(to_hdr, sizeof(to_hdr), "<%s>", to_uri);
 
     /* Compute Digest credentials using GLib MD5 (no dependency on sofia's
-       auth_digest_ha1 / auth_digest_response which can silently misbehave). */
+     *      auth_digest_ha1 / auth_digest_response which can silently misbehave). */
     const char *cnonce = "4b6f63616c20";
     const char *nc     = "00000001";
     int use_qop = qop_str && strcmp(qop_str, "auth") == 0;
@@ -356,73 +356,86 @@ static void invite_with_digest(SofiaCtx *ctx, sip_t const *sip, int status)
 
     char auth_hdr[2048];
     int n = snprintf(auth_hdr, sizeof(auth_hdr),
-        "Digest username=\"%s\", realm=\"%s\", nonce=\"%s\","
-        " uri=\"%s\", response=\"%s\", algorithm=MD5",
-        ctx->user, realm, nonce, to_uri, hexresp);
+                     "Digest username=\"%s\", realm=\"%s\", nonce=\"%s\","
+                     " uri=\"%s\", response=\"%s\", algorithm=MD5",
+                     ctx->user, realm, nonce, to_uri, hexresp);
     if (use_qop && n > 0 && n < (int)sizeof(auth_hdr))
         n += snprintf(auth_hdr + n, sizeof(auth_hdr) - n,
-            ", qop=auth, nc=%s, cnonce=\"%s\"", nc, cnonce);
-    if (opaque_str && n > 0 && n < (int)sizeof(auth_hdr))
-        snprintf(auth_hdr + n, sizeof(auth_hdr) - n,
-            ", opaque=\"%s\"", opaque_str);
+                      ", qop=auth, nc=%s, cnonce=\"%s\"", nc, cnonce);
+        if (opaque_str && n > 0 && n < (int)sizeof(auth_hdr))
+            snprintf(auth_hdr + n, sizeof(auth_hdr) - n,
+                     ", opaque=\"%s\"", opaque_str);
 
-    /* Preserve the Call-ID and From tag from the 401 response before destroying
-       the old handle.  Calling nua_invite on the same handle (after the 401
-       terminated its transaction) is silently dropped by sofia's NUA state
-       machine; we need a fresh handle.  But RFC 3261 §22.1 requires the retry
-       to carry the same Call-ID and From tag, otherwise Asterisk treats the
-       retry as a brand-new call and issues a fresh 401. */
-    char preserved_call_id[256] = {0};
-    char from_hdr[320];
-    if (sip && sip->sip_call_id && sip->sip_call_id->i_id)
-        snprintf(preserved_call_id, sizeof(preserved_call_id),
-                 "%s", sip->sip_call_id->i_id);
-    if (sip && sip->sip_from) {
-        sip_from_t *f = sip->sip_from;
-        const char *u = f->a_url->url_user ? f->a_url->url_user : ctx->user;
-        const char *h = f->a_url->url_host ? f->a_url->url_host : ctx->server;
-        if (f->a_tag)
-            snprintf(from_hdr, sizeof(from_hdr),
-                     "<%s:%s@%s>;tag=%s", sip_scheme(ctx), u, h, f->a_tag);
-        else
-            snprintf(from_hdr, sizeof(from_hdr),
-                     "<%s:%s@%s>", sip_scheme(ctx), u, h);
-    } else {
-        snprintf(from_hdr, sizeof(from_hdr),
-                 "<%s:%s@%s>", sip_scheme(ctx), ctx->user, ctx->server);
-    }
+            /* Preserve the Call-ID and From tag from the 401 response before destroying
+             *      the old handle.  Calling nua_invite on the same handle (after the 401
+             *      terminated its transaction) is silently dropped by sofia's NUA state
+             *      machine; we need a fresh handle.  But RFC 3261 §22.1 requires the retry
+             *      to carry the same Call-ID and From tag, otherwise Asterisk treats the
+             *      retry as a brand-new call and issues a fresh 401. */
+            char preserved_call_id[256] = {0};
+        char from_hdr[320];
+        if (sip && sip->sip_call_id && sip->sip_call_id->i_id)
+            snprintf(preserved_call_id, sizeof(preserved_call_id),
+                     "%s", sip->sip_call_id->i_id);
+            if (sip && sip->sip_from) {
+                sip_from_t *f = sip->sip_from;
+                const char *u = f->a_url->url_user ? f->a_url->url_user : ctx->user;
+                const char *h = f->a_url->url_host ? f->a_url->url_host : ctx->server;
+                if (f->a_tag)
+                    snprintf(from_hdr, sizeof(from_hdr),
+                             "<%s:%s@%s>;tag=%s", sip_scheme(ctx), u, h, f->a_tag);
+                    else
+                        snprintf(from_hdr, sizeof(from_hdr),
+                                 "<%s:%s@%s>", sip_scheme(ctx), u, h);
+            } else {
+                snprintf(from_hdr, sizeof(from_hdr),
+                         "<%s:%s@%s>", sip_scheme(ctx), ctx->user, ctx->server);
+            }
 
-    if (ctx->call_nh) { nua_handle_unref(ctx->call_nh); ctx->call_nh = NULL; }
-    if (preserved_call_id[0])
-        ctx->call_nh = nua_handle(ctx->nua, NULL,
-                                  SIPTAG_FROM_STR(from_hdr),
-                                  SIPTAG_TO_STR(to_hdr),
-                                  SIPTAG_CALL_ID_STR(preserved_call_id),
-                                  TAG_END());
-    else
-        ctx->call_nh = nua_handle(ctx->nua, NULL,
-                                  SIPTAG_FROM_STR(from_hdr),
-                                  SIPTAG_TO_STR(to_hdr),
-                                  TAG_END());
+            /* NEU: Wir bauen den Contact-Header auch für das Auth-INVITE zusammen */
+            char contact[512];
+            if (ctx->transport == TRANSPORT_TLS) {
+                snprintf(contact, sizeof(contact), "<sips:%s@%s>", ctx->user, ctx->local_ip);
+            } else if (ctx->transport == TRANSPORT_TCP) {
+                snprintf(contact, sizeof(contact), "<sip:%s@%s;transport=tcp>", ctx->user, ctx->local_ip);
+            } else {
+                snprintf(contact, sizeof(contact), "<sip:%s@%s>", ctx->user, ctx->local_ip);
+            }
 
-    free(realm_str); free(nonce_str); free(qop_str); free(opaque_str);
+            if (ctx->call_nh) { nua_handle_unref(ctx->call_nh); ctx->call_nh = NULL; }
+            if (preserved_call_id[0])
+                ctx->call_nh = nua_handle(ctx->nua, NULL,
+                                          SIPTAG_FROM_STR(from_hdr),
+                                          SIPTAG_TO_STR(to_hdr),
+                                          SIPTAG_CALL_ID_STR(preserved_call_id),
+                                          TAG_END());
+                else
+                    ctx->call_nh = nua_handle(ctx->nua, NULL,
+                                              SIPTAG_FROM_STR(from_hdr),
+                                              SIPTAG_TO_STR(to_hdr),
+                                              TAG_END());
 
-    ctx->local_rtp_port = get_free_udp_port();
-    char sdp[512];
-    build_audio_sdp(ctx, sdp, sizeof(sdp), "sendrecv", ctx->local_rtp_port);
+                    free(realm_str); free(nonce_str); free(qop_str); free(opaque_str);
 
-    if (status == 401)
-        nua_invite(ctx->call_nh,
-                   SIPTAG_AUTHORIZATION_STR(auth_hdr),
-                   SIPTAG_CONTENT_TYPE_STR("application/sdp"),
-                   SIPTAG_PAYLOAD_STR(sdp),
-                   TAG_END());
-    else
-        nua_invite(ctx->call_nh,
-                   SIPTAG_PROXY_AUTHORIZATION_STR(auth_hdr),
-                   SIPTAG_CONTENT_TYPE_STR("application/sdp"),
-                   SIPTAG_PAYLOAD_STR(sdp),
-                   TAG_END());
+                ctx->local_rtp_port = get_free_udp_port();
+                char sdp[512];
+                build_audio_sdp(ctx, sdp, sizeof(sdp), "sendrecv", ctx->local_rtp_port);
+
+                /* SIPTAG_CONTACT_STR hier in beide Zweige eingefügt: */
+                if (status == 401)
+                    nua_invite(ctx->call_nh,
+                               SIPTAG_CONTACT_STR(contact), // <-- Eingefügt
+                               SIPTAG_AUTHORIZATION_STR(auth_hdr),
+                               SIPTAG_CONTENT_TYPE_STR("application/sdp"),
+                               SIPTAG_PAYLOAD_STR(sdp),
+                               TAG_END());
+                    else
+                        nua_invite(ctx->call_nh,
+                                   SIPTAG_CONTACT_STR(contact), // <-- Eingefügt
+                                   SIPTAG_PROXY_AUTHORIZATION_STR(auth_hdr),
+                                   SIPTAG_CONTENT_TYPE_STR("application/sdp"),
+                                   SIPTAG_PAYLOAD_STR(sdp),
+                                   TAG_END());
 }
 
 /* Compute digest response and re-send consultation INVITE with Authorization header.
@@ -1078,6 +1091,16 @@ void sofia_call(SofiaCtx *ctx, const char *number) {
         snprintf(to, sizeof(to), "%s:%s@%s", sip_scheme(ctx), number, ctx->server);
     snprintf(from, sizeof(from), "<%s:%s@%s>", sip_scheme(ctx), ctx->user, ctx->server);
 
+    /* NEU: Wir bauen den Contact-Header für Sofia 1.13 */
+    char contact[512];
+    if (ctx->transport == TRANSPORT_TLS) {
+        snprintf(contact, sizeof(contact), "<sips:%s@%s>", ctx->user, ctx->local_ip);
+    } else if (ctx->transport == TRANSPORT_TCP) {
+        snprintf(contact, sizeof(contact), "<sip:%s@%s;transport=tcp>", ctx->user, ctx->local_ip);
+    } else {
+        snprintf(contact, sizeof(contact), "<sip:%s@%s>", ctx->user, ctx->local_ip);
+    }
+
     free(ctx->call_to);
     ctx->call_to = strdup(to);   /* saved for use by invite_with_digest */
 
@@ -1086,7 +1109,10 @@ void sofia_call(SofiaCtx *ctx, const char *number) {
                               SIPTAG_FROM_STR(from),
                               SIPTAG_TO_STR(to),
                               TAG_END());
+
+    /* Hier wird der Contact-Header jetzt explizit mitgeschickt */
     nua_invite(ctx->call_nh,
+               SIPTAG_CONTACT_STR(contact), // <-- Das rettet Arch Linux / Sofia 1.13
                SIPTAG_CONTENT_TYPE_STR("application/sdp"),
                SIPTAG_PAYLOAD_STR(sdp),
                TAG_END());
