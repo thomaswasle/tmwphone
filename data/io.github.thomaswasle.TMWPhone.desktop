@@ -2,9 +2,9 @@
 Name=TMWPhone
 Comment=SIP Softphone
 Exec=tmwphone
-Icon=net.loca.TMWPhone
+Icon=io.github.thomaswasle.TMWPhone
 Terminal=false
 Type=Application
 Categories=Network;Telephony;
 Keywords=SIP;VoIP;phone;call;
-StartupWMClass=net.loca.TMWPhone
+StartupWMClass=io.github.thomaswasle.TMWPhone

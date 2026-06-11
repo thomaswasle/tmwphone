@@ -35,12 +35,12 @@ package() {
     install -Dm755 target/release/tmwphone \
         "$pkgdir/usr/bin/tmwphone"
 
-    install -Dm644 data/net.loca.TMWPhone.gschema.xml \
-        "$pkgdir/usr/share/glib-2.0/schemas/net.loca.TMWPhone.gschema.xml"
+    install -Dm644 data/io.github.thomaswasle.TMWPhone.gschema.xml \
+        "$pkgdir/usr/share/glib-2.0/schemas/io.github.thomaswasle.TMWPhone.gschema.xml"
 
-    install -Dm644 data/net.loca.TMWPhone.desktop \
-        "$pkgdir/usr/share/applications/net.loca.TMWPhone.desktop"
+    install -Dm644 data/io.github.thomaswasle.TMWPhone.desktop \
+        "$pkgdir/usr/share/applications/io.github.thomaswasle.TMWPhone.desktop"
 
-    install -Dm644 data/icons/net.loca.TMWPhone.svg \
-        "$pkgdir/usr/share/icons/hicolor/scalable/apps/net.loca.TMWPhone.svg"
+    install -Dm644 data/icons/io.github.thomaswasle.TMWPhone.svg \
+        "$pkgdir/usr/share/icons/hicolor/scalable/apps/io.github.thomaswasle.TMWPhone.svg"
 }

@@ -107,7 +107,7 @@ mod imp {
                 move |_, _| {
                     let dialog = adw::AboutDialog::builder()
                         .application_name("TMWPhone")
-                        .application_icon("net.loca.TMWPhone")
+                        .application_icon("io.github.thomaswasle.TMWPhone")
                         .developer_name("Thomas Müller-Wasle")
                         .version(env!("CARGO_PKG_VERSION"))
                         .build();
@@ -131,7 +131,7 @@ glib::wrapper! {
 impl App {
     pub fn new() -> Self {
         glib::Object::builder()
-            .property("application-id", "net.loca.TMWPhone")
+            .property("application-id", "io.github.thomaswasle.TMWPhone")
             .property("flags", gio::ApplicationFlags::FLAGS_NONE)
             .build()
     }

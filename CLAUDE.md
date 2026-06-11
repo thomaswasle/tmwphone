@@ -22,7 +22,7 @@ cargo run
 RUST_LOG=debug cargo run
 ```
 
-`build.rs` runs `glib-compile-schemas data/` on every build, so changes to `data/net.loca.TMWPhone.gschema.xml` are picked up automatically. It also compiles `src/sip/glue.c` via the `cc` crate.
+`build.rs` runs `glib-compile-schemas data/` on every build, so changes to `data/io.github.thomaswasle.TMWPhone.gschema.xml` are picked up automatically. It also compiles `src/sip/glue.c` via the `cc` crate.
 
 There are no tests currently.
 
@@ -87,7 +87,7 @@ window.rs          — MainWindow: top-level UI orchestration, manages Vec<Activ
 
 ### Keyring (`src/keyring.rs`)
 
-- Thin wrapper around `libsecret` (`libsecret::password_store/lookup/clear_sync`) using schema `net.loca.TMWPhone` with attribute `service = "sip-account"`.
+- Thin wrapper around `libsecret` (`libsecret::password_store/lookup/clear_sync`) using schema `io.github.thomaswasle.TMWPhone` with attribute `service = "sip-account"`.
 - `keyring::save`, `keyring::load`, `keyring::clear` — called from `SettingsDialog` (save/load) and `MainWindow` (load on startup).
 - The SIP password is **no longer stored in GSettings** — the `sip-password` key was removed from the schema.
 
@@ -101,7 +101,7 @@ window.rs          — MainWindow: top-level UI orchestration, manages Vec<Activ
 
 ### GSettings
 
-Schema: `net.loca.TMWPhone` (`data/net.loca.TMWPhone.gschema.xml`). Keys: `sip-server`, `sip-username`, `sip-display-name`, `sip-port` (all kept only for one-time migration to `accounts.json`), `audio-input-device` (integer, -1 = system default), `audio-output-device` (integer, -1 = system default). SIP account configuration is now stored in `~/.local/share/tmwphone/accounts.json` (see Accounts section). SIP passwords are stored in the system keyring via `src/keyring.rs`. The `src/config.rs` wrapper is unused.
+Schema: `io.github.thomaswasle.TMWPhone` (`data/io.github.thomaswasle.TMWPhone.gschema.xml`). Keys: `sip-server`, `sip-username`, `sip-display-name`, `sip-port` (all kept only for one-time migration to `accounts.json`), `audio-input-device` (integer, -1 = system default), `audio-output-device` (integer, -1 = system default). SIP account configuration is now stored in `~/.local/share/tmwphone/accounts.json` (see Accounts section). SIP passwords are stored in the system keyring via `src/keyring.rs`. The `src/config.rs` wrapper is unused.
 
 ## Key constraints
 

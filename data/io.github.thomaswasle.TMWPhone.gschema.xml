@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <schemalist>
-  <schema id="net.loca.TMWPhone" path="/net/loca/tmwphone/">
+  <schema id="io.github.thomaswasle.TMWPhone" path="/io/github/thomaswasle/tmwphone/">
 
     <key name="sip-server" type="s">
       <default>''</default>

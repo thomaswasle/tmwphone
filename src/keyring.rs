@@ -4,7 +4,7 @@ use libsecret::{Schema, SchemaAttributeType, SchemaFlags};
 
 fn schema() -> Schema {
     Schema::new(
-        "net.loca.TMWPhone",
+        "io.github.thomaswasle.TMWPhone",
         SchemaFlags::NONE,
         HashMap::from([("service", SchemaAttributeType::String)]),
     )
