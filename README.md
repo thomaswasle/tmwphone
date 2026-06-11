@@ -2,7 +2,7 @@
 
 A SIP softphone for the GNOME desktop, written in Rust.
 
-![TMWPhone screenshot](data/icons/net.loca.TMWPhone.svg)
+![TMWPhone screenshot](data/icons/io.github.thomaswasle.TMWPhone.svg)
 
 ## Features
 

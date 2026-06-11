@@ -114,7 +114,7 @@ pub fn save(accounts: &[Account]) {
 }
 
 fn migrate_from_gsettings() -> Vec<Account> {
-    let settings = gio::Settings::new("net.loca.TMWPhone");
+    let settings = gio::Settings::new("io.github.thomaswasle.TMWPhone");
     let username = settings.string("sip-username").to_string();
     let server = settings.string("sip-server").to_string();
     if username.is_empty() || server.is_empty() {
