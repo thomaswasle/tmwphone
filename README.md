@@ -110,4 +110,4 @@ startup silence caused by RTP timestamp mismatch.
 
 ## License
 
-MIT © 2026 Thomas Müller-Wasle
+Apache-2.0 © 2026 Thomas Müller-Wasle

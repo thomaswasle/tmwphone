@@ -4,8 +4,8 @@ pkgver=0.1.0
 pkgrel=1
 pkgdesc="SIP softphone client for GNOME"
 arch=('x86_64' 'aarch64')
-url="https://gitlab.loca.net/mueller/tmwphone"
-license=('MIT')
+url="https://github.com/thomaswasle/tmwphone"
+license=('Apache-2.0')
 depends=(
     'gtk4'
     'libadwaita'
@@ -21,16 +21,16 @@ makedepends=(
     'cargo'
     'pkg-config'
 )
-source=("$pkgname-$pkgver.tar.gz::$url/-/archive/v$pkgver/$pkgname-v$pkgver.tar.gz")
+source=("$pkgname-$pkgver.tar.gz::https://github.com/thomaswasle/tmwphone/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('SKIP')
 
 build() {
-    cd "$pkgname-v$pkgver"
+    cd "$pkgname-$pkgver"
     cargo build --release --locked
 }
 
 package() {
-    cd "$pkgname-v$pkgver"
+    cd "$pkgname-$pkgver"
 
     install -Dm755 target/release/tmwphone \
         "$pkgdir/usr/bin/tmwphone"
