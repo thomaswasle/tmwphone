@@ -2,7 +2,11 @@
 name = "tmwphone"
 version = "0.1.0"
 edition = "2021"
+description = "SIP softphone client for the GNOME desktop"
+authors = ["Thomas Müller-Wasle <thomas.mueller1401@gmx.de>"]
 license = "Apache-2.0"
+repository = "https://github.com/thomaswasle/tmwphone"
+homepage = "https://github.com/thomaswasle/tmwphone"
 
 [[bin]]
 name = "tmwphone"
