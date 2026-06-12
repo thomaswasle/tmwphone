@@ -22,6 +22,7 @@ I designed this app for my personal needs. There might be missing a lot of featu
 - Mute (local audio suppression)
 - In-call keypad
 - Dial by pressing Enter in the number field
+- Secondary ringer output (ring simultaneously on a second audio device, e.g. speakers while voice goes through headphones)
 - Password stored in GNOME Keyring via libsecret
 - Native GNOME look using GTK4 + libadwaita
 

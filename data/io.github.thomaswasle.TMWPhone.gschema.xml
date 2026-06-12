@@ -33,5 +33,10 @@
       <summary>PJSUA2 playback device index (-1 = system default)</summary>
     </key>
 
+    <key name="ringer-output-device" type="s">
+      <default>''</default>
+      <summary>Display name of the secondary audio output device used for the ringer (empty = disabled)</summary>
+    </key>
+
   </schema>
 </schemalist>

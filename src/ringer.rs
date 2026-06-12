@@ -12,6 +12,18 @@ pub struct Ringer {
     alive: Rc<RefCell<bool>>,
 }
 
+/// Returns all audio output devices currently visible to GStreamer.
+/// The first call on a given run initialises GStreamer if it hasn't been already.
+pub fn enumerate_output_devices() -> Vec<gst::Device> {
+    let _ = gst::init();
+    let monitor = gst::DeviceMonitor::new();
+    monitor.add_filter(Some("Audio/Sink"), None);
+    let _ = monitor.start();
+    let devices: Vec<gst::Device> = monitor.devices().into_iter().collect();
+    monitor.stop();
+    devices
+}
+
 /// Advance to the next cadence step after `delay` ms, toggling the volume element.
 /// Stops cleanly when `alive` is set to false (i.e. on Ringer::drop).
 fn tick(cadence: Rc<Vec<u32>>, step: Rc<RefCell<usize>>, vol: gst::Element, alive: Rc<RefCell<bool>>) {
@@ -31,16 +43,17 @@ fn tick(cadence: Rc<Vec<u32>>, step: Rc<RefCell<usize>>, vol: gst::Element, aliv
 
 impl Ringer {
     /// Incoming call tone: 440 Hz, 0.4 s on / 0.2 s off / 0.4 s on / 2.0 s off.
-    pub fn start_incoming() -> Option<Self> {
-        Self::build(440.0, &[400, 200, 400, 2000])
+    /// Pass `Some(device)` to output on a specific audio device instead of the system default.
+    pub fn start_incoming(device: Option<&gst::Device>) -> Option<Self> {
+        Self::build(440.0, &[400, 200, 400, 2000], device)
     }
 
     /// Outgoing ringback tone: 425 Hz, 1 s on / 3 s off.
-    pub fn start_ringback() -> Option<Self> {
-        Self::build(425.0, &[1000, 3000])
+    pub fn start_ringback(device: Option<&gst::Device>) -> Option<Self> {
+        Self::build(425.0, &[1000, 3000], device)
     }
 
-    fn build(freq: f64, cadence_ms: &[u32]) -> Option<Self> {
+    fn build(freq: f64, cadence_ms: &[u32], device: Option<&gst::Device>) -> Option<Self> {
         gst::init().ok()?;
 
         // No is-live=true: the sink clocks the pipeline so buffers are paced
@@ -60,7 +73,13 @@ impl Ringer {
 
         let conv   = gst::ElementFactory::make("audioconvert").build().ok()?;
         let resamp = gst::ElementFactory::make("audioresample").build().ok()?;
-        let sink   = gst::ElementFactory::make("autoaudiosink").build().ok()?;
+
+        // When a specific device is requested, create its sink element directly so
+        // the tone plays on that device regardless of the system default.
+        let sink = match device.and_then(|d| d.create_element(None).ok()) {
+            Some(el) => el,
+            None => gst::ElementFactory::make("autoaudiosink").build().ok()?,
+        };
 
         let pipeline = gst::Pipeline::new();
         pipeline.add_many([&src, &vol, &conv, &resamp, &sink]).ok()?;

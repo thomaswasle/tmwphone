@@ -1,4 +1,4 @@
-use gtk4::{glib, prelude::*, subclass::prelude::*, CompositeTemplate};
+use gtk4::{gio, glib, prelude::*, subclass::prelude::*, CompositeTemplate};
 use libadwaita as adw;
 use adw::prelude::*;
 use adw::subclass::prelude::*;
@@ -14,6 +14,8 @@ mod imp {
     pub struct SettingsDialog {
         #[template_child]
         pub accounts_page: TemplateChild<adw::PreferencesPage>,
+        #[template_child]
+        pub ringer_device_row: TemplateChild<adw::ComboRow>,
 
         pub accounts_group: RefCell<Option<adw::PreferencesGroup>>,
         pub registered_ids: RefCell<HashSet<String>>,
@@ -330,6 +332,40 @@ mod imp {
             row
         }
 
+        pub fn build_audio_ui(&self) {
+            let devices = crate::ringer::enumerate_output_devices();
+            // Use UFCS to avoid ambiguity with gtk4::prelude::AppInfoExt::display_name.
+            let device_names: Vec<String> = devices
+                .iter()
+                .map(|d| gstreamer::prelude::DeviceExt::display_name(d).to_string())
+                .collect();
+
+            let model_items: Vec<&str> = std::iter::once("None (disabled)")
+                .chain(device_names.iter().map(|s| s.as_str()))
+                .collect();
+            let model = gtk4::StringList::new(&model_items);
+            self.ringer_device_row.set_model(Some(&model));
+
+            let settings = gio::Settings::new("io.github.thomaswasle.TMWPhone");
+            let current = settings.string("ringer-output-device");
+            if !current.is_empty() {
+                if let Some(idx) = device_names.iter().position(|n| n == current.as_str()) {
+                    self.ringer_device_row.set_selected((idx + 1) as u32);
+                }
+            }
+
+            self.ringer_device_row.connect_selected_notify(glib::clone!(
+                #[strong]
+                device_names,
+                move |row| {
+                    let settings = gio::Settings::new("io.github.thomaswasle.TMWPhone");
+                    let idx = row.selected() as usize;
+                    let value = if idx == 0 { "" } else { &device_names[idx - 1] };
+                    let _ = settings.set_string("ringer-output-device", value);
+                }
+            ));
+        }
+
         fn add_new_account(&self) {
             let account = crate::accounts::Account::new();
             let mut accounts = crate::accounts::load();
@@ -361,6 +397,7 @@ impl SettingsDialog {
             }
         }
         obj.imp().build_accounts_ui();
+        obj.imp().build_audio_ui();
         obj
     }
 }

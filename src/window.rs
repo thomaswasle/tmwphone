@@ -59,6 +59,7 @@ mod imp {
         pub audio_session: RefCell<Option<AudioSession>>,
         pub consult_session: RefCell<Option<AudioSession>>,
         pub ringer: RefCell<Option<Ringer>>,
+        pub secondary_ringer: RefCell<Option<Ringer>>,
         pub primary_caller: RefCell<String>,
         pub keepalive_timer: RefCell<Option<glib::SourceId>>,
         pub call_log: RefCell<call_log::CallLog>,
@@ -664,7 +665,19 @@ mod imp {
                         cs.show_answer_button(true);
                     }
                     self.show_call_screen(true);
-                    *self.ringer.borrow_mut() = Ringer::start_incoming();
+                    *self.ringer.borrow_mut() = Ringer::start_incoming(None);
+                    {
+                        let settings = gio::Settings::new("io.github.thomaswasle.TMWPhone");
+                        let name = settings.string("ringer-output-device");
+                        if !name.is_empty() {
+                            let dev = crate::ringer::enumerate_output_devices()
+                                .into_iter()
+                                // UFCS: avoid ambiguity with gtk4::prelude::AppInfoExt::display_name.
+                                .find(|d| gstreamer::prelude::DeviceExt::display_name(d).as_str() == name.as_str());
+                            *self.secondary_ringer.borrow_mut() =
+                                dev.as_ref().and_then(|d| Ringer::start_incoming(Some(d)));
+                        }
+                    }
                     *self.pending_call.borrow_mut() = Some(PendingCall {
                         direction: call_log::Direction::Incoming,
                         number: from,
@@ -675,6 +688,7 @@ mod imp {
 
                 SipEvent::CallConnected => {
                     *self.ringer.borrow_mut() = None;
+                    *self.secondary_ringer.borrow_mut() = None;
                     if let Some(cs) = self.call_screen.get() {
                         cs.show_answer_button(false);
                         cs.start_timer();
@@ -699,6 +713,7 @@ mod imp {
 
                 SipEvent::CallEnded => {
                     *self.ringer.borrow_mut() = None;
+                    *self.secondary_ringer.borrow_mut() = None;
                     *self.audio_session.borrow_mut() = None;
                     *self.consult_session.borrow_mut() = None;
                     *self.active_account_id.borrow_mut() = None;
@@ -717,6 +732,7 @@ mod imp {
 
                 SipEvent::CallFailed(reason) => {
                     *self.ringer.borrow_mut() = None;
+                    *self.secondary_ringer.borrow_mut() = None;
                     *self.audio_session.borrow_mut() = None;
                     *self.consult_session.borrow_mut() = None;
                     *self.active_account_id.borrow_mut() = None;
@@ -731,6 +747,7 @@ mod imp {
 
                 SipEvent::TransferOk => {
                     *self.ringer.borrow_mut() = None;
+                    *self.secondary_ringer.borrow_mut() = None;
                     *self.audio_session.borrow_mut() = None;
                     *self.consult_session.borrow_mut() = None;
                     *self.active_account_id.borrow_mut() = None;
@@ -820,7 +837,7 @@ mod imp {
                 cs.show_answer_button(false);
             }
             self.show_call_screen(true);
-            *self.ringer.borrow_mut() = Ringer::start_ringback();
+            *self.ringer.borrow_mut() = Ringer::start_ringback(None);
             *self.pending_call.borrow_mut() = Some(PendingCall {
                 direction: call_log::Direction::Outgoing,
                 number: number.to_owned(),
