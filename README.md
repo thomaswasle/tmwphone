@@ -4,6 +4,10 @@ A SIP softphone for the GNOME desktop, written in Rust.
 
 ![TMWPhone screenshot](data/icons/io.github.thomaswasle.TMWPhone.svg)
 
+## Status
+
+I designed this app for my personal needs. There might be missing a lot of features. Also some features may not work as expected. If you miss something or if you find a bug do not hesitate to open an issue or pr!
+
 ## Features
 
 - Outgoing and incoming SIP calls
