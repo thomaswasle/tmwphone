@@ -43,6 +43,7 @@ struct SofiaCtx {
     int               remote_rtp_port;
     int               remote_rtp_payload; /* selected RTP payload type (0=PCMU, 8=PCMA) */
 
+    gboolean          reg_auth_tried;   /* true after one auth attempt in the current REGISTER cycle */
     gboolean          call_auth_tried;  /* true after first digest attempt */
     gboolean          call_established; /* true after the first 200 OK for INVITE */
     gboolean          call_is_incoming; /* true while call_nh is a ringing inbound call awaiting answer */
@@ -88,6 +89,18 @@ static const char *sip_scheme(const SofiaCtx *ctx) {
 /* Returns ";transport=tcp" for TCP, "" for UDP and TLS (TLS uses sips: scheme). */
 static const char *transport_param(const SofiaCtx *ctx) {
     return ctx->transport == TRANSPORT_TCP ? ";transport=tcp" : "";
+}
+
+/* Build the Contact header for INVITE/re-INVITE.  Sofia 1.13 omits an
+   auto-generated Contact in some cases, so every INVITE we send (initial,
+   auth-retry, hold re-INVITE, consultation) sets it explicitly. */
+static void build_contact(const SofiaCtx *ctx, char *buf, size_t len) {
+    if (ctx->transport == TRANSPORT_TLS)
+        snprintf(buf, len, "<sips:%s@%s>", ctx->user, ctx->local_ip);
+    else if (ctx->transport == TRANSPORT_TCP)
+        snprintf(buf, len, "<sip:%s@%s;transport=tcp>", ctx->user, ctx->local_ip);
+    else
+        snprintf(buf, len, "<sip:%s@%s>", ctx->user, ctx->local_ip);
 }
 
 /* ── Local-interface selection ────────────────────────────────────────────── */
@@ -182,8 +195,10 @@ static void extract_rtp_into(SofiaCtx *ctx, sip_t const *sip,
             const char *m_addr = c_addr;
             if (m->m_connections && m->m_connections->c_address)
                 m_addr = m->m_connections->c_address;
-            if (m_addr)
+            if (m_addr && ip_len > 0) {
                 strncpy(ip_out, m_addr, ip_len - 1);
+                ip_out[ip_len - 1] = '\0'; /* strncpy won't terminate on truncation */
+            }
             *port_out = (int)m->m_port;
 
             /* Pick the first non-telephone-event payload type as the codec. */
@@ -350,8 +365,13 @@ static void invite_with_digest(SofiaCtx *ctx, sip_t const *sip, int status)
     snprintf(to_hdr, sizeof(to_hdr), "<%s>", to_uri);
 
     /* Compute Digest credentials using GLib MD5 (no dependency on sofia's
-     *      auth_digest_ha1 / auth_digest_response which can silently misbehave). */
-    const char *cnonce = "4b6f63616c20";
+     *      auth_digest_ha1 / auth_digest_response which can silently misbehave).
+     * cnonce is freshly randomised per request (with qop=auth a fixed cnonce
+     * would defeat the client-side replay protection); nc stays 00000001 since
+     * each fresh cnonce is used exactly once. */
+    char cnonce_buf[17];
+    snprintf(cnonce_buf, sizeof(cnonce_buf), "%08x%08x", g_random_int(), g_random_int());
+    const char *cnonce = cnonce_buf;
     const char *nc     = "00000001";
     int use_qop = qop_str && strcmp(qop_str, "auth") == 0;
 
@@ -366,10 +386,11 @@ static void invite_with_digest(SofiaCtx *ctx, sip_t const *sip, int status)
     char hexresp[33];
     digest_response(ha1, nonce, use_qop, nc, cnonce, ha2, hexresp);
 
-    fprintf(stderr, "[tmwphone] INVITE auth: user=%s realm=%s nonce=%s uri=%s pw_len=%zu response=%.8s...\n",
-            ctx->user, realm, nonce, to_uri,
-            ctx->password ? strlen(ctx->password) : (size_t)0,
-            hexresp);
+    /* Verbose auth tracing is gated behind an env var so credentials-adjacent
+       material (realm/nonce/response) never lands in stderr by default. */
+    if (getenv("TMWPHONE_DEBUG_AUTH"))
+        fprintf(stderr, "[tmwphone] INVITE auth: user=%s realm=%s uri=%s\n",
+                ctx->user, realm, to_uri);
     if (ctx->password && ctx->password[0] == '\0')
         fprintf(stderr, "[tmwphone] WARNING: password is empty — did you save the account before connecting?\n");
 
@@ -411,15 +432,8 @@ static void invite_with_digest(SofiaCtx *ctx, sip_t const *sip, int status)
                          "<%s:%s@%s>", sip_scheme(ctx), ctx->user, ctx->server);
             }
 
-            /* NEU: Wir bauen den Contact-Header auch für das Auth-INVITE zusammen */
             char contact[512];
-            if (ctx->transport == TRANSPORT_TLS) {
-                snprintf(contact, sizeof(contact), "<sips:%s@%s>", ctx->user, ctx->local_ip);
-            } else if (ctx->transport == TRANSPORT_TCP) {
-                snprintf(contact, sizeof(contact), "<sip:%s@%s;transport=tcp>", ctx->user, ctx->local_ip);
-            } else {
-                snprintf(contact, sizeof(contact), "<sip:%s@%s>", ctx->user, ctx->local_ip);
-            }
+            build_contact(ctx, contact, sizeof(contact));
 
             if (ctx->call_nh) { nua_handle_unref(ctx->call_nh); ctx->call_nh = NULL; }
             if (preserved_call_id[0])
@@ -495,7 +509,10 @@ static void consult_with_digest(SofiaCtx *ctx, sip_t const *sip, int status)
     char to_hdr[520];
     snprintf(to_hdr, sizeof(to_hdr), "<%s>", to_uri);
 
-    const char *cnonce = "4b6f63616c20";
+    /* Fresh per-request cnonce; see invite_with_digest. */
+    char cnonce_buf[17];
+    snprintf(cnonce_buf, sizeof(cnonce_buf), "%08x%08x", g_random_int(), g_random_int());
+    const char *cnonce = cnonce_buf;
     const char *nc     = "00000001";
     int use_qop = qop_str && strcmp(qop_str, "auth") == 0;
 
@@ -561,14 +578,19 @@ static void consult_with_digest(SofiaCtx *ctx, sip_t const *sip, int status)
     char sdp[512];
     build_audio_sdp(ctx, sdp, sizeof(sdp), "sendrecv", ctx->consult_local_rtp_port);
 
+    char contact[512];
+    build_contact(ctx, contact, sizeof(contact));
+
     if (status == 401)
         nua_invite(ctx->consult_nh,
+                   SIPTAG_CONTACT_STR(contact),
                    SIPTAG_AUTHORIZATION_STR(auth_hdr),
                    SIPTAG_CONTENT_TYPE_STR("application/sdp"),
                    SIPTAG_PAYLOAD_STR(sdp),
                    TAG_END());
     else
         nua_invite(ctx->consult_nh,
+                   SIPTAG_CONTACT_STR(contact),
                    SIPTAG_PROXY_AUTHORIZATION_STR(auth_hdr),
                    SIPTAG_CONTENT_TYPE_STR("application/sdp"),
                    SIPTAG_PAYLOAD_STR(sdp),
@@ -594,8 +616,15 @@ static void nua_cb(nua_event_t event, int status, char const *phrase,
 
     case nua_r_register:
         if (status == 200) {
+            ctx->reg_auth_tried = FALSE; /* reset for the next refresh cycle */
             ctx->cb(SOFIA_EV_REGISTER_OK, status, phrase, NULL, ctx->userdata);
-        } else if ((status == 401 || status == 407) && ctx->user && ctx->password) {
+        } else if ((status == 401 || status == 407) && ctx->user && ctx->password
+                   && !ctx->reg_auth_tried) {
+            /* Authenticate exactly once per REGISTER cycle.  A second challenge
+               after we already presented credentials means they were rejected
+               (wrong password / stale nonce) — re-authenticating would loop
+               REGISTER↔401 indefinitely, so fall through to REGISTER_FAIL. */
+            ctx->reg_auth_tried = TRUE;
             msg_auth_t const *challenge = (status == 401)
                 ? sip->sip_www_authenticate
                 : sip->sip_proxy_authenticate;
@@ -610,6 +639,7 @@ static void nua_cb(nua_event_t event, int status, char const *phrase,
                state-machine churn before the 200 OK arrives. */
             nua_authenticate(nh, NUTAG_AUTH(ctx->auth_str), TAG_END());
         } else if (status >= 300) {
+            ctx->reg_auth_tried = FALSE;
             ctx->cb(SOFIA_EV_REGISTER_FAIL, status, phrase, NULL, ctx->userdata);
         }
         /* 1xx provisional and internal (0) statuses: wait for final response. */
@@ -618,8 +648,9 @@ static void nua_cb(nua_event_t event, int status, char const *phrase,
     case nua_r_unregister:
         if (!ctx->cleanup_pending) break;
 
-        if (status == 401 || status == 407) {
-            /* Asterisk challenges the wildcard unregister — authenticate. */
+        if ((status == 401 || status == 407) && !ctx->reg_auth_tried) {
+            /* Asterisk challenges the wildcard unregister — authenticate once. */
+            ctx->reg_auth_tried = TRUE;
             msg_auth_t const *challenge = (status == 401)
                 ? sip->sip_www_authenticate
                 : sip->sip_proxy_authenticate;
@@ -628,10 +659,14 @@ static void nua_cb(nua_event_t event, int status, char const *phrase,
             free(realm);
             nua_authenticate(nh, NUTAG_AUTH(ctx->auth_str), TAG_END());
         } else {
-            /* 200 OK (all contacts removed) or any error (404, 403, ...) —
-               either way, proceed with the real registration.  Errors just
-               mean there was nothing to remove, which is fine. */
+            /* 200 OK (all contacts removed), any error (404, 403, ...), or a
+               repeated challenge after we already authenticated — either way,
+               proceed with the real registration.  The cleanup is best-effort;
+               errors just mean there was nothing to remove, which is fine.
+               Reset reg_auth_tried so the REGISTER's own first challenge is
+               not mistaken for a retry. */
             ctx->cleanup_pending = FALSE;
+            ctx->reg_auth_tried  = FALSE;
             nua_register(ctx->reg_nh,
                          NUTAG_REGISTRAR(ctx->cleanup_registrar),
                          TAG_END());
@@ -1103,6 +1138,7 @@ void sofia_register(SofiaCtx   *ctx,
     free(ctx->cleanup_registrar);
     ctx->cleanup_registrar = strdup(registrar);
     ctx->cleanup_pending   = TRUE;
+    ctx->reg_auth_tried    = FALSE; /* fresh auth cycle */
 
     /* Before the normal REGISTER, remove ALL contacts from previous sessions
        that were never properly unregistered.  Without this, Asterisk
@@ -1123,7 +1159,9 @@ void sofia_unregister(SofiaCtx *ctx) {
 
 void sofia_reregister(SofiaCtx *ctx) {
     if (!ctx->reg_nh) return;
-    /* Refresh the registration without resetting any handle-level state. */
+    /* Refresh the registration without resetting any handle-level state.
+       Allow one auth attempt for the refresh's challenge. */
+    ctx->reg_auth_tried = FALSE;
     nua_register(ctx->reg_nh, TAG_END());
 }
 
@@ -1146,15 +1184,8 @@ void sofia_call(SofiaCtx *ctx, const char *number) {
         snprintf(to, sizeof(to), "%s:%s@%s", sip_scheme(ctx), number, ctx->server);
     snprintf(from, sizeof(from), "<%s:%s@%s>", sip_scheme(ctx), ctx->user, ctx->server);
 
-    /* NEU: Wir bauen den Contact-Header für Sofia 1.13 */
     char contact[512];
-    if (ctx->transport == TRANSPORT_TLS) {
-        snprintf(contact, sizeof(contact), "<sips:%s@%s>", ctx->user, ctx->local_ip);
-    } else if (ctx->transport == TRANSPORT_TCP) {
-        snprintf(contact, sizeof(contact), "<sip:%s@%s;transport=tcp>", ctx->user, ctx->local_ip);
-    } else {
-        snprintf(contact, sizeof(contact), "<sip:%s@%s>", ctx->user, ctx->local_ip);
-    }
+    build_contact(ctx, contact, sizeof(contact));
 
     free(ctx->call_to);
     ctx->call_to = strdup(to);   /* saved for use by invite_with_digest */
@@ -1165,9 +1196,9 @@ void sofia_call(SofiaCtx *ctx, const char *number) {
                               SIPTAG_TO_STR(to),
                               TAG_END());
 
-    /* Hier wird der Contact-Header jetzt explizit mitgeschickt */
+    /* Explicit Contact: sofia 1.13 otherwise omits it on some paths. */
     nua_invite(ctx->call_nh,
-               SIPTAG_CONTACT_STR(contact), // <-- Das rettet Arch Linux / Sofia 1.13
+               SIPTAG_CONTACT_STR(contact),
                SIPTAG_CONTENT_TYPE_STR("application/sdp"),
                SIPTAG_PAYLOAD_STR(sdp),
                TAG_END());
@@ -1231,7 +1262,10 @@ void sofia_set_hold(SofiaCtx *ctx, int hold) {
     char sdp[512];
     build_audio_sdp(ctx, sdp, sizeof(sdp),
                     hold ? "sendonly" : "sendrecv", ctx->local_rtp_port);
+    char contact[512];
+    build_contact(ctx, contact, sizeof(contact));
     nua_invite(ctx->call_nh,
+               SIPTAG_CONTACT_STR(contact),
                SIPTAG_CONTENT_TYPE_STR("application/sdp"),
                SIPTAG_PAYLOAD_STR(sdp),
                TAG_END());
@@ -1279,12 +1313,16 @@ void sofia_start_consultation(SofiaCtx *ctx, const char *number) {
     free(ctx->consult_to);
     ctx->consult_to = strdup(to);
 
+    char contact[512];
+    build_contact(ctx, contact, sizeof(contact));
+
     if (ctx->consult_nh) { nua_handle_unref(ctx->consult_nh); ctx->consult_nh = NULL; }
     ctx->consult_nh = nua_handle(ctx->nua, NULL,
                                   SIPTAG_FROM_STR(from),
                                   SIPTAG_TO_STR(to),
                                   TAG_END());
     nua_invite(ctx->consult_nh,
+               SIPTAG_CONTACT_STR(contact),
                SIPTAG_CONTENT_TYPE_STR("application/sdp"),
                SIPTAG_PAYLOAD_STR(sdp),
                TAG_END());

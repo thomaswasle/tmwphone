@@ -5,6 +5,8 @@ use gtk4::{gio, glib};
 pub struct AudioSession {
     send: gst::Pipeline,
     recv: gst::Pipeline,
+    // `volume` element on the send path; its `mute` property toggles the mic.
+    send_volume: gst::Element,
     // Bus watches remove themselves when their guard is dropped, so they must
     // be held for the lifetime of the session — otherwise pipeline errors and
     // warnings go unreported.
@@ -108,6 +110,9 @@ impl AudioSession {
         // ── Send pipeline ────────────────────────────────────────────────────
 
         let audio_in  = make("autoaudiosrc")?;
+        // `volume` sits right after the source so muting silences the mic
+        // independently of hold (which pauses the whole send pipeline).
+        let volume    = make("volume")?;
         let aconv_s   = make("audioconvert")?;
         let aresamp   = make("audioresample")?;
 
@@ -138,10 +143,11 @@ impl AudioSession {
         let udpsink = sink_b.build().map_err(|e| format!("udpsink: {e}"))?;
 
         let send = gst::Pipeline::new();
-        for el in [&audio_in, &aconv_s, &aresamp, &raw_caps, &encoder, &pay, &udpsink] {
+        for el in [&audio_in, &volume, &aconv_s, &aresamp, &raw_caps, &encoder, &pay, &udpsink] {
             send.add(el).map_err(|e| format!("send add: {e}"))?;
         }
-        audio_in.link(&aconv_s).map_err(|e| format!("src→conv: {e}"))?;
+        audio_in.link(&volume).map_err(|e| format!("src→vol: {e}"))?;
+        volume.link(&aconv_s).map_err(|e| format!("vol→conv: {e}"))?;
         aconv_s.link(&aresamp).map_err(|e| format!("conv→resamp: {e}"))?;
         aresamp.link(&raw_caps).map_err(|e| format!("resamp→rawcaps: {e}"))?;
         raw_caps.link(&encoder).map_err(|e| format!("rawcaps→enc: {e}"))?;
@@ -179,12 +185,19 @@ impl AudioSession {
         recv.set_state(gst::State::Playing)
             .map_err(|e| format!("recv PLAY: {e:?}"))?;
 
-        Ok(AudioSession { send, recv, _bus_watches: bus_watches })
+        Ok(AudioSession { send, recv, send_volume: volume, _bus_watches: bus_watches })
     }
 
     pub fn set_hold(&self, hold: bool) {
         let state = if hold { gst::State::Paused } else { gst::State::Playing };
         let _ = self.send.set_state(state);
+    }
+
+    /// Mute or unmute the outgoing microphone audio.  Independent of hold:
+    /// the `volume` element stays in the pipeline, so toggling mute works
+    /// whether or not the call is on hold.
+    pub fn set_muted(&self, muted: bool) {
+        self.send_volume.set_property("mute", muted);
     }
 }
 

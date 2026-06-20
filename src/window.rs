@@ -248,7 +248,16 @@ mod imp {
                     None,
                     move |args| {
                         let muted = args[1].get::<bool>().unwrap_or(false);
-                        obj.imp().with_active_engine(|e| e.set_muted(muted));
+                        // Mute is local audio only (no SIP signaling).  Apply to
+                        // whichever sessions exist so it also works while a
+                        // consultation leg is active.
+                        let imp = obj.imp();
+                        if let Some(session) = imp.audio_session.borrow().as_ref() {
+                            session.set_muted(muted);
+                        }
+                        if let Some(session) = imp.consult_session.borrow().as_ref() {
+                            session.set_muted(muted);
+                        }
                         None
                     }
                 ),
@@ -441,6 +450,15 @@ mod imp {
         // ── Engine helpers ────────────────────────────────────────────────────
 
         /// Call `f` with the SipEngine that owns the current call, if any.
+        ///
+        /// INVARIANT: `f` runs while `active_engines` is borrowed. Some engine
+        /// methods (e.g. `answer_call`, `cancel_consultation`) cause the C layer
+        /// to fire a SIP event callback *synchronously*, which re-enters
+        /// `handle_sip_event` on this same stack. Those handlers therefore must
+        /// NOT borrow `active_engines` (mut or otherwise) — doing so would panic
+        /// with a RefCell double-borrow. Handlers reached this way today only
+        /// touch other fields (audio_session, ringer, call_screen), which is why
+        /// it is safe; keep it that way.
         fn with_active_engine<F: FnOnce(&SipEngine)>(&self, f: F) {
             let id = match self.active_account_id.borrow().clone() {
                 Some(id) => id,
@@ -727,7 +745,7 @@ mod imp {
                     if let Some(entry) = self.recents_entry.get() {
                         entry.set_text("");
                     }
-                    self.finalize_pending_call(false);
+                    self.finalize_pending_call();
                 }
 
                 SipEvent::CallFailed(reason) => {
@@ -742,7 +760,7 @@ mod imp {
                     self.show_call_screen(false);
                     self.toast_overlay
                         .add_toast(error_toast(&format!("Call failed: {reason}")));
-                    self.finalize_pending_call(true);
+                    self.finalize_pending_call();
                 }
 
                 SipEvent::TransferOk => {
@@ -755,7 +773,7 @@ mod imp {
                         cs.stop_timer();
                     }
                     self.show_call_screen(false);
-                    self.finalize_pending_call(false);
+                    self.finalize_pending_call();
                     let toast = adw::Toast::new("Call transferred successfully");
                     toast.set_timeout(4);
                     self.toast_overlay.add_toast(toast);
@@ -861,18 +879,19 @@ mod imp {
 
         // ── Call log ─────────────────────────────────────────────────────────
 
-        fn finalize_pending_call(&self, outgoing_failed: bool) {
+        fn finalize_pending_call(&self) {
             let Some(pending) = self.pending_call.borrow_mut().take() else {
                 return;
             };
             let now = now_unix();
             let (status, duration) = match pending.connected_at {
                 Some(t) => (call_log::Status::Answered, (now - t).max(0) as u32),
+                // Never connected: incoming → missed, outgoing → failed
+                // (covers reject, no-answer, and user cancel alike — the log
+                // has no separate "cancelled" status).
                 None => {
                     let status = if pending.direction == call_log::Direction::Incoming {
                         call_log::Status::Missed
-                    } else if outgoing_failed {
-                        call_log::Status::Failed
                     } else {
                         call_log::Status::Failed
                     };
