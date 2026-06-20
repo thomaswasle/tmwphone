@@ -156,10 +156,6 @@ impl SipEngine {
         unsafe { ffi::sofia_hangup(self.ctx) }
     }
 
-    pub fn set_muted(&self, muted: bool) {
-        log::debug!("set_muted({muted}) — audio not yet implemented");
-    }
-
     pub fn set_hold(&self, hold: bool) {
         if self.ctx.is_null() { return; }
         unsafe { ffi::sofia_set_hold(self.ctx, hold as c_int) }

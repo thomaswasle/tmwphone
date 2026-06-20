@@ -248,7 +248,16 @@ mod imp {
                     None,
                     move |args| {
                         let muted = args[1].get::<bool>().unwrap_or(false);
-                        obj.imp().with_active_engine(|e| e.set_muted(muted));
+                        // Mute is local audio only (no SIP signaling).  Apply to
+                        // whichever sessions exist so it also works while a
+                        // consultation leg is active.
+                        let imp = obj.imp();
+                        if let Some(session) = imp.audio_session.borrow().as_ref() {
+                            session.set_muted(muted);
+                        }
+                        if let Some(session) = imp.consult_session.borrow().as_ref() {
+                            session.set_muted(muted);
+                        }
                         None
                     }
                 ),
