@@ -195,8 +195,10 @@ static void extract_rtp_into(SofiaCtx *ctx, sip_t const *sip,
             const char *m_addr = c_addr;
             if (m->m_connections && m->m_connections->c_address)
                 m_addr = m->m_connections->c_address;
-            if (m_addr)
+            if (m_addr && ip_len > 0) {
                 strncpy(ip_out, m_addr, ip_len - 1);
+                ip_out[ip_len - 1] = '\0'; /* strncpy won't terminate on truncation */
+            }
             *port_out = (int)m->m_port;
 
             /* Pick the first non-telephone-event payload type as the codec. */

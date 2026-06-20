@@ -142,7 +142,7 @@ impl SipEngine {
 
     pub fn make_call(&self, number: &str) {
         if self.ctx.is_null() { return; }
-        let s = CString::new(number).unwrap_or_default();
+        let Ok(s) = CString::new(number) else { return; };
         unsafe { ffi::sofia_call(self.ctx, s.as_ptr()) }
     }
 
@@ -171,13 +171,13 @@ impl SipEngine {
 
     pub fn blind_transfer(&self, number: &str) {
         if self.ctx.is_null() { return; }
-        let s = CString::new(number).unwrap();
+        let Ok(s) = CString::new(number) else { return; };
         unsafe { ffi::sofia_blind_transfer(self.ctx, s.as_ptr()) }
     }
 
     pub fn start_consultation(&self, number: &str) {
         if self.ctx.is_null() { return; }
-        let s = CString::new(number).unwrap();
+        let Ok(s) = CString::new(number) else { return; };
         unsafe { ffi::sofia_start_consultation(self.ctx, s.as_ptr()) }
     }
 
