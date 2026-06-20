@@ -45,6 +45,7 @@ struct SofiaCtx {
 
     gboolean          call_auth_tried;  /* true after first digest attempt */
     gboolean          call_established; /* true after the first 200 OK for INVITE */
+    gboolean          call_is_incoming; /* true while call_nh is a ringing inbound call awaiting answer */
     gboolean          call_on_hold;
     gboolean          shutting_down;
     gboolean          shutdown_done;
@@ -200,11 +201,29 @@ static void extract_rtp_into(SofiaCtx *ctx, sip_t const *sip,
     su_home_deinit(home);
 }
 
+/* Ensure ctx->local_ip holds a usable source address for media.  The address
+   is picked once at context creation, but that can fail if the network is down
+   at startup (DNS failure / no route), leaving "0.0.0.0", which would advertise
+   an unroutable address in SDP and produce a connected call with no audio.
+   Re-resolve here against the registrar so a later (network-up) call recovers,
+   and warn loudly if it still cannot be determined. */
+static void ensure_local_ip(SofiaCtx *ctx) {
+    if (ctx->local_ip[0] && strcmp(ctx->local_ip, "0.0.0.0") != 0)
+        return;
+    if (ctx->server && *ctx->server)
+        get_local_ip_for(ctx->server, ctx->sip_port > 0 ? ctx->sip_port : 5060,
+                         ctx->local_ip, sizeof(ctx->local_ip));
+    if (!ctx->local_ip[0] || strcmp(ctx->local_ip, "0.0.0.0") == 0)
+        fprintf(stderr, "[tmwphone] WARNING: could not determine a local IP for "
+                        "media (network down?); call audio will not work\n");
+}
+
 /* Build an SDP offer/answer for ctx->local_ip:port.
    direction is "sendrecv", "sendonly", or "recvonly".
    port is the local RTP port to advertise. */
 static void build_audio_sdp(SofiaCtx *ctx, char *buf, size_t len,
                              const char *direction, int port) {
+    ensure_local_ip(ctx);
     snprintf(buf, len,
         "v=0\r\n"
         "o=- 0 0 IN IP4 %s\r\n"
@@ -636,8 +655,14 @@ static void nua_cb(nua_event_t event, int status, char const *phrase,
             break;
         }
 
-        /* New incoming call */
-        if (ctx->call_nh && ctx->call_nh != nh) nua_handle_unref(ctx->call_nh);
+        /* New incoming call.  If we're already busy with another call (active,
+           ringing inbound, or an outbound attempt in progress), reject this one
+           with 486 Busy Here.  Clobbering ctx->call_nh here would orphan the
+           existing call's handle and leave its audio/UI state dangling. */
+        if (ctx->call_nh && ctx->call_nh != nh) {
+            nua_respond(nh, SIP_486_BUSY_HERE, TAG_END());
+            break;
+        }
         ctx->call_nh = nua_handle_ref(nh);
 
         /* Reset per-call state so stale flags from a previous call never leak
@@ -646,6 +671,7 @@ static void nua_cb(nua_event_t event, int status, char const *phrase,
         ctx->call_established = FALSE;
         ctx->call_auth_tried  = FALSE;
         ctx->call_on_hold     = FALSE;
+        ctx->call_is_incoming = TRUE;
 
         /* Store caller's SDP offer so sofia_answer() can include it later. */
         extract_rtp_into(ctx, sip,
@@ -949,18 +975,46 @@ SofiaCtx *sofia_ctx_create(const char *server, int port, const char *proxy,
                            TAG_END());
     }
 
-    if (proxy && *proxy) {
-        char proxy_uri[512];
-        if (strncmp(proxy, "sip:", 4) == 0 || strncmp(proxy, "sips:", 5) == 0)
-            snprintf(proxy_uri, sizeof(proxy_uri), "%s", proxy);
-        else if (transport == TRANSPORT_TLS)
-            snprintf(proxy_uri, sizeof(proxy_uri), "sips:%s", proxy);
-        else if (transport == TRANSPORT_TCP)
-            snprintf(proxy_uri, sizeof(proxy_uri), "sip:%s;transport=tcp", proxy);
-        else
-            snprintf(proxy_uri, sizeof(proxy_uri), "sip:%s", proxy);
-        ctx->proxy = strdup(proxy_uri);
-        nua_set_params(ctx->nua, NUTAG_PROXY(ctx->proxy), TAG_END());
+    /* Always route outgoing requests through an explicit next-hop, the same
+       way REGISTER pins its destination via NUTAG_REGISTRAR.  Without this,
+       sofia resolves each INVITE's request-URI itself through its built-in
+       resolver, which fails with "503 DNS Error" on hosts whose resolv.conf
+       it cannot parse (e.g. systemd-resolved's "trust-ad" option) — and that
+       failure happens even for IP-literal targets that need no DNS at all.
+
+       The route URI MUST carry ";lr" (loose routing).  Without it, sofia
+       1.12.x does strict (pre-loaded) routing and splices the proxy host into
+       the request-URI, producing a malformed "user@proxy@host" URI that the
+       registrar rejects ("syntax error on Request Line"). */
+    {
+        char proxy_uri[600];
+        if (proxy && *proxy) {
+            /* User-configured outbound proxy. */
+            if (strncmp(proxy, "sip:", 4) == 0 || strncmp(proxy, "sips:", 5) == 0)
+                snprintf(proxy_uri, sizeof(proxy_uri), "%s", proxy);
+            else if (transport == TRANSPORT_TLS)
+                snprintf(proxy_uri, sizeof(proxy_uri), "sips:%s", proxy);
+            else if (transport == TRANSPORT_TCP)
+                snprintf(proxy_uri, sizeof(proxy_uri), "sip:%s;transport=tcp", proxy);
+            else
+                snprintf(proxy_uri, sizeof(proxy_uri), "sip:%s", proxy);
+        } else if (server && *server) {
+            /* No explicit proxy: default to the registrar host:port, so calls
+               take the same resolver-free next-hop that REGISTER already uses. */
+            snprintf(proxy_uri, sizeof(proxy_uri), "%s:%s:%d%s",
+                     sip_scheme(ctx), server, port, transport_param(ctx));
+        } else {
+            proxy_uri[0] = '\0';
+        }
+
+        /* Ensure loose routing so the request-URI is left intact. */
+        if (proxy_uri[0] && !strstr(proxy_uri, ";lr"))
+            strncat(proxy_uri, ";lr", sizeof(proxy_uri) - strlen(proxy_uri) - 1);
+
+        if (proxy_uri[0]) {
+            ctx->proxy = strdup(proxy_uri);
+            nua_set_params(ctx->nua, NUTAG_PROXY(ctx->proxy), TAG_END());
+        }
     }
 
     return ctx;
@@ -1078,6 +1132,7 @@ void sofia_call(SofiaCtx *ctx, const char *number) {
 
     ctx->call_auth_tried  = FALSE;
     ctx->call_established = FALSE;
+    ctx->call_is_incoming = FALSE;
     ctx->call_on_hold     = FALSE;
     ctx->local_rtp_port   = get_free_udp_port();
 
@@ -1132,6 +1187,7 @@ void sofia_answer(SofiaCtx *ctx) {
                 TAG_END());
 
     ctx->call_established = TRUE;
+    ctx->call_is_incoming = FALSE;
     ctx->cb(SOFIA_EV_CALL_CONNECTED, 200, "OK", NULL, ctx->userdata);
 
     if (ctx->remote_rtp_port > 0) {
@@ -1144,7 +1200,29 @@ void sofia_answer(SofiaCtx *ctx) {
 }
 
 void sofia_hangup(SofiaCtx *ctx) {
-    if (ctx->call_nh) nua_bye(ctx->call_nh, TAG_END());
+    if (!ctx->call_nh) return;
+
+    if (ctx->call_established) {
+        /* Active call — terminate with BYE. */
+        nua_bye(ctx->call_nh, TAG_END());
+    } else if (ctx->call_is_incoming) {
+        /* Ringing inbound call — decline it with a final failure response.
+           A BYE is invalid before the dialog is confirmed.  NUA does not
+           deliver a callback for our own response, so clean up call state and
+           notify the UI here. */
+        nua_respond(ctx->call_nh, SIP_603_DECLINE, TAG_END());
+        nua_handle_unref(ctx->call_nh); ctx->call_nh = NULL;
+        ctx->call_established = FALSE;
+        ctx->call_is_incoming = FALSE;
+        ctx->call_on_hold = FALSE;
+        ctx->local_rtp_port = 0; ctx->remote_rtp_port = 0;
+        ctx->remote_rtp_ip[0] = '\0'; ctx->remote_rtp_payload = 0;
+        ctx->cb(SOFIA_EV_CALL_ENDED, 603, "Declined", NULL, ctx->userdata);
+    } else {
+        /* Outbound call not yet answered — cancel it.  The resulting 487 on the
+           INVITE drives cleanup via the nua_r_invite (status >= 300) handler. */
+        nua_cancel(ctx->call_nh, TAG_END());
+    }
 }
 
 void sofia_set_hold(SofiaCtx *ctx, int hold) {

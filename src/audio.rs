@@ -5,6 +5,10 @@ use gtk4::{gio, glib};
 pub struct AudioSession {
     send: gst::Pipeline,
     recv: gst::Pipeline,
+    // Bus watches remove themselves when their guard is dropped, so they must
+    // be held for the lifetime of the session — otherwise pipeline errors and
+    // warnings go unreported.
+    _bus_watches: Vec<gst::bus::BusWatchGuard>,
 }
 
 fn make(name: &str) -> Result<gst::Element, String> {
@@ -145,10 +149,13 @@ impl AudioSession {
         pay.link(&udpsink).map_err(|e| format!("pay→udpsink: {e}"))?;
 
         // ── Bus monitoring ───────────────────────────────────────────────────
+        // add_watch returns a guard that removes the watch when dropped, so the
+        // guards are collected into the session rather than discarded here.
+        let mut bus_watches = Vec::new();
         for (label, pipeline) in [("send", &send), ("recv", &recv)] {
             let label = label.to_owned();
             if let Some(bus) = pipeline.bus() {
-                bus.add_watch(move |_, msg| {
+                if let Ok(guard) = bus.add_watch(move |_, msg| {
                     use gst::MessageView;
                     match msg.view() {
                         MessageView::Error(e) => {
@@ -160,7 +167,9 @@ impl AudioSession {
                         _ => {}
                     }
                     glib::ControlFlow::Continue
-                }).ok();
+                }) {
+                    bus_watches.push(guard);
+                }
             }
         }
 
@@ -170,7 +179,7 @@ impl AudioSession {
         recv.set_state(gst::State::Playing)
             .map_err(|e| format!("recv PLAY: {e:?}"))?;
 
-        Ok(AudioSession { send, recv })
+        Ok(AudioSession { send, recv, _bus_watches: bus_watches })
     }
 
     pub fn set_hold(&self, hold: bool) {
