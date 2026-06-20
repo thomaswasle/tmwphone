@@ -113,10 +113,11 @@ impl SipEngine {
     }
 
     pub fn register(&self, config: SipConfig) {
-        let server = CString::new(config.server).unwrap();
-        let user = CString::new(config.username).unwrap();
-        let password = CString::new(config.password).unwrap();
-        let display_name = CString::new(config.display_name).unwrap();
+        if self.ctx.is_null() { return; }
+        let server = CString::new(config.server).unwrap_or_default();
+        let user = CString::new(config.username).unwrap_or_default();
+        let password = CString::new(config.password).unwrap_or_default();
+        let display_name = CString::new(config.display_name).unwrap_or_default();
         unsafe {
             ffi::sofia_register(
                 self.ctx,
@@ -130,6 +131,7 @@ impl SipEngine {
     }
 
     pub fn unregister(&self) {
+        if self.ctx.is_null() { return; }
         unsafe { ffi::sofia_unregister(self.ctx) }
     }
 
@@ -139,15 +141,18 @@ impl SipEngine {
     }
 
     pub fn make_call(&self, number: &str) {
-        let s = CString::new(number).unwrap();
+        if self.ctx.is_null() { return; }
+        let s = CString::new(number).unwrap_or_default();
         unsafe { ffi::sofia_call(self.ctx, s.as_ptr()) }
     }
 
     pub fn answer_call(&self) {
+        if self.ctx.is_null() { return; }
         unsafe { ffi::sofia_answer(self.ctx) }
     }
 
     pub fn hangup(&self) {
+        if self.ctx.is_null() { return; }
         unsafe { ffi::sofia_hangup(self.ctx) }
     }
 
@@ -188,6 +193,34 @@ impl SipEngine {
     pub fn cancel_consultation(&self) {
         if self.ctx.is_null() { return; }
         unsafe { ffi::sofia_cancel_consultation(self.ctx) }
+    }
+}
+
+// ── Failure-message translation ──────────────────────────────────────────────
+
+/// Translate a SIP failure status + reason phrase into a clear, actionable
+/// message for the UI.  In particular, sofia reports internal routing and name
+/// resolution failures as "503 DNS Error", which is misleading: it usually
+/// means the SIP server address could not be resolved/routed locally, not that
+/// the server itself is unavailable.
+fn friendly_call_failure(status: c_int, phrase: &str) -> String {
+    if phrase.to_ascii_lowercase().contains("dns") {
+        return "Could not route the call — the SIP server address could not be \
+                resolved. Check the server hostname, or set an outbound proxy, in \
+                Settings."
+            .to_string();
+    }
+    match status {
+        401 | 407 => "Authentication failed — check the account password in Settings.".to_string(),
+        403 => "Rejected by the server (forbidden).".to_string(),
+        404 => "Number not found.".to_string(),
+        408 => "No response from the SIP server (timed out).".to_string(),
+        480 => "The number is currently unavailable.".to_string(),
+        486 | 600 => "The line is busy.".to_string(),
+        603 => "Call declined.".to_string(),
+        _ if status >= 500 => format!("Server error ({status} {phrase})."),
+        _ if status > 0 => format!("{status} {phrase}"),
+        _ => phrase.to_string(),
     }
 }
 
@@ -250,9 +283,9 @@ unsafe extern "C" fn sofia_event_cb(
             }
         }
         ffi::SOFIA_EV_CALL_ENDED => Some(SipEvent::CallEnded),
-        ffi::SOFIA_EV_CALL_FAILED => Some(SipEvent::CallFailed(format!(
-            "{status} {}", phrase_str()
-        ))),
+        ffi::SOFIA_EV_CALL_FAILED => Some(SipEvent::CallFailed(
+            friendly_call_failure(status, &phrase_str())
+        )),
         ffi::SOFIA_EV_TRANSFER_OK => Some(SipEvent::TransferOk),
         ffi::SOFIA_EV_TRANSFER_FAILED => Some(SipEvent::TransferFailed(phrase_str())),
         ffi::SOFIA_EV_CONSULT_CONNECTED => Some(SipEvent::ConsultConnected),
