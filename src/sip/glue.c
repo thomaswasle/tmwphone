@@ -37,6 +37,7 @@ struct SofiaCtx {
     char             *auth_str;
     char             *call_to;    /* To URI of the current outgoing call */
     char              local_ip[INET_ADDRSTRLEN];
+    int               local_sip_port; /* bound SIP transport port — must appear in Contact */
 
     int               local_rtp_port;
     char              remote_rtp_ip[64];
@@ -72,6 +73,10 @@ struct SofiaCtx {
     gboolean          consult_established;
     gboolean          consult_auth_tried;
     gboolean          consult_ended; /* CONSULT_ENDED already fired; suppress duplicate */
+    gboolean          transfer_in_progress; /* attended-transfer REFER outstanding: the
+                                               network tears down the consult leg via
+                                               Replaces, so we must not self-BYE it when
+                                               the primary call ends */
 
     /* Dialog identifiers captured from the consultation 200 OK, used to build
        the Replaces header in the attended-transfer Refer-To URI. */
@@ -95,12 +100,17 @@ static const char *transport_param(const SofiaCtx *ctx) {
    auto-generated Contact in some cases, so every INVITE we send (initial,
    auth-retry, hold re-INVITE, consultation) sets it explicitly. */
 static void build_contact(const SofiaCtx *ctx, char *buf, size_t len) {
+    /* The Contact MUST carry the bound SIP transport port: in-dialog requests
+       the peer originates (e.g. a remote-initiated BYE) are routed to this URI,
+       and an omitted port defaults to 5060 — which we do NOT listen on, so the
+       BYE would be lost and the call would never end locally. */
+    int port = ctx->local_sip_port;
     if (ctx->transport == TRANSPORT_TLS)
-        snprintf(buf, len, "<sips:%s@%s>", ctx->user, ctx->local_ip);
+        snprintf(buf, len, "<sips:%s@%s:%d>", ctx->user, ctx->local_ip, port);
     else if (ctx->transport == TRANSPORT_TCP)
-        snprintf(buf, len, "<sip:%s@%s;transport=tcp>", ctx->user, ctx->local_ip);
+        snprintf(buf, len, "<sip:%s@%s:%d;transport=tcp>", ctx->user, ctx->local_ip, port);
     else
-        snprintf(buf, len, "<sip:%s@%s>", ctx->user, ctx->local_ip);
+        snprintf(buf, len, "<sip:%s@%s:%d>", ctx->user, ctx->local_ip, port);
 }
 
 /* ── Local-interface selection ────────────────────────────────────────────── */
@@ -597,6 +607,21 @@ static void consult_with_digest(SofiaCtx *ctx, sip_t const *sip, int status)
                    TAG_END());
 }
 
+/* Tear down an in-progress consultation leg at the SIP level: BYE if it is
+   established, otherwise CANCEL the pending INVITE.  consult_nh itself is
+   unref'd by the nua_r_bye / nua_r_invite(>=300) response callbacks; we set
+   consult_ended here so that callback suppresses a duplicate CONSULT_ENDED.
+   No-op when there is no consultation. */
+static void drop_consult_leg(SofiaCtx *ctx) {
+    if (!ctx->consult_nh) return;
+    if (ctx->consult_established)
+        nua_bye(ctx->consult_nh, TAG_END());
+    else
+        nua_cancel(ctx->consult_nh, TAG_END());
+    ctx->consult_ended = TRUE;
+    ctx->consult_established = FALSE;
+}
+
 /* ── NUA callback ─────────────────────────────────────────────────────────── */
 
 static void nua_cb(nua_event_t event, int status, char const *phrase,
@@ -818,6 +843,12 @@ static void nua_cb(nua_event_t event, int status, char const *phrase,
         }
         /* Primary call */
         ctx->cb(SOFIA_EV_CALL_ENDED, status, phrase, NULL, ctx->userdata);
+        /* The primary call ended while a consultation leg is still up.  Drop it
+           so it cannot orphan — UNLESS an attended transfer is in flight, in
+           which case the network terminates the consult leg via Replaces and a
+           self-BYE here would race it (see sofia_complete_transfer). */
+        if (ctx->consult_nh && !ctx->transfer_in_progress)
+            drop_consult_leg(ctx);
         ctx->local_rtp_port = 0; ctx->remote_rtp_port = 0;
         ctx->remote_rtp_ip[0] = '\0'; ctx->remote_rtp_payload = 0;
         ctx->call_established = FALSE; ctx->call_on_hold = FALSE;
@@ -845,6 +876,7 @@ static void nua_cb(nua_event_t event, int status, char const *phrase,
         if (status == 202 || (status >= 200 && status < 300)) {
             /* REFER accepted — wait for NOTIFY to confirm */
         } else if (status >= 300) {
+            ctx->transfer_in_progress = FALSE;
             ctx->cb(SOFIA_EV_TRANSFER_FAILED, status, phrase, NULL, ctx->userdata);
         }
         break;
@@ -854,10 +886,13 @@ static void nua_cb(nua_event_t event, int status, char const *phrase,
         nua_respond(nh, SIP_200_OK, TAG_END());
         if (sip && sip->sip_payload && sip->sip_payload->pl_data) {
             const char *body = sip->sip_payload->pl_data;
-            if (strstr(body, "SIP/2.0 2"))       /* 2xx = success */
+            if (strstr(body, "SIP/2.0 2")) {      /* 2xx = success */
+                ctx->transfer_in_progress = FALSE;
                 ctx->cb(SOFIA_EV_TRANSFER_OK, 200, "Transfer complete", NULL, ctx->userdata);
-            else if (strstr(body, "SIP/2.0 4") || strstr(body, "SIP/2.0 5"))
+            } else if (strstr(body, "SIP/2.0 4") || strstr(body, "SIP/2.0 5")) {
+                ctx->transfer_in_progress = FALSE;
                 ctx->cb(SOFIA_EV_TRANSFER_FAILED, 400, "Transfer failed", NULL, ctx->userdata);
+            }
         }
         break;
 
@@ -875,6 +910,10 @@ static void nua_cb(nua_event_t event, int status, char const *phrase,
             nua_handle_unref(ctx->consult_nh); ctx->consult_nh = NULL;
         } else if (nh == ctx->call_nh) {
             ctx->cb(SOFIA_EV_CALL_FAILED, status, phrase, NULL, ctx->userdata);
+            /* Drop a still-active consult leg so it cannot orphan (unless an
+               attended transfer is in flight — see the nua_i_bye branch). */
+            if (ctx->consult_nh && !ctx->transfer_in_progress)
+                drop_consult_leg(ctx);
             nua_handle_unref(ctx->call_nh); ctx->call_nh = NULL;
         }
         /* Errors on stale/unknown handles (e.g. NOTIFY response after the
@@ -908,12 +947,17 @@ SofiaCtx *sofia_ctx_create(const char *server, int port, const char *proxy,
         get_local_ip_for(server, port, ctx->local_ip, sizeof(ctx->local_ip));
 
     char nua_url[128];
+    /* Pick the local SIP port once and remember it: build_contact must advertise
+       this exact port so peer-originated in-dialog requests (e.g. BYE) reach us. */
+    ctx->local_sip_port = (transport == TRANSPORT_UDP)
+        ? get_free_udp_port()
+        : get_free_tcp_port();
     if (transport == TRANSPORT_TLS)
-        snprintf(nua_url, sizeof(nua_url), "sips:%s:%d", ctx->local_ip, get_free_tcp_port());
+        snprintf(nua_url, sizeof(nua_url), "sips:%s:%d", ctx->local_ip, ctx->local_sip_port);
     else if (transport == TRANSPORT_TCP)
-        snprintf(nua_url, sizeof(nua_url), "sip:%s:%d;transport=tcp", ctx->local_ip, get_free_tcp_port());
+        snprintf(nua_url, sizeof(nua_url), "sip:%s:%d;transport=tcp", ctx->local_ip, ctx->local_sip_port);
     else
-        snprintf(nua_url, sizeof(nua_url), "sip:%s:%d", ctx->local_ip, get_free_udp_port());
+        snprintf(nua_url, sizeof(nua_url), "sip:%s:%d", ctx->local_ip, ctx->local_sip_port);
 
     ctx->root = su_glib_root_create(NULL);
     if (!ctx->root) {
@@ -1172,6 +1216,7 @@ void sofia_call(SofiaCtx *ctx, const char *number) {
     ctx->call_established = FALSE;
     ctx->call_is_incoming = FALSE;
     ctx->call_on_hold     = FALSE;
+    ctx->transfer_in_progress = FALSE;
     ctx->local_rtp_port   = get_free_udp_port();
 
     char sdp[512];
@@ -1208,6 +1253,7 @@ void sofia_answer(SofiaCtx *ctx) {
     if (!ctx->call_nh) return;
 
     ctx->call_on_hold   = FALSE;
+    ctx->transfer_in_progress = FALSE;
     ctx->local_rtp_port = get_free_udp_port();
     char sdp[512];
     build_audio_sdp(ctx, sdp, sizeof(sdp), "sendrecv", ctx->local_rtp_port);
@@ -1231,6 +1277,14 @@ void sofia_answer(SofiaCtx *ctx) {
 }
 
 void sofia_hangup(SofiaCtx *ctx) {
+    /* Drop any in-progress consultation leg first so it cannot orphan when the
+       primary call goes away.  This is the explicit local-hangup path only —
+       we must NOT auto-drop the consult leg on a server-initiated BYE of the
+       primary, which during an attended transfer would race the Replaces that
+       atomically terminates the consult leg (see sofia_complete_transfer). The
+       primary CALL_ENDED that follows clears the consult UI/audio. */
+    drop_consult_leg(ctx);
+
     if (!ctx->call_nh) return;
 
     if (ctx->call_established) {
@@ -1298,6 +1352,7 @@ void sofia_start_consultation(SofiaCtx *ctx, const char *number) {
 
     ctx->consult_established = FALSE;
     ctx->consult_auth_tried  = FALSE;
+    ctx->transfer_in_progress = FALSE;
     ctx->consult_local_rtp_port = get_free_udp_port();
 
     char sdp[512];
@@ -1352,6 +1407,12 @@ void sofia_complete_transfer(SofiaCtx *ctx) {
         snprintf(refer_to, sizeof(refer_to), "<%s>", ctx->consult_to);
     }
 
+    /* Mark the transfer as in flight so that a BYE on the primary call (the
+       server tears it down once we are REFER'd out) does NOT trigger a
+       self-BYE of the consult leg — the Replaces handles that.  Cleared when
+       the transfer concludes (NOTIFY sipfrag, or a REFER failure). */
+    ctx->transfer_in_progress = TRUE;
+
     nua_refer(ctx->call_nh, SIPTAG_REFER_TO_STR(refer_to), TAG_END());
 
     /* Do NOT BYE consult_nh here.  With Replaces, 886 atomically terminates
@@ -1364,18 +1425,10 @@ void sofia_complete_transfer(SofiaCtx *ctx) {
 void sofia_cancel_consultation(SofiaCtx *ctx) {
     if (!ctx->consult_nh) return;
 
-    if (ctx->consult_established)
-        nua_bye(ctx->consult_nh, TAG_END());
-    else
-        nua_cancel(ctx->consult_nh, TAG_END());
+    drop_consult_leg(ctx);
 
-    /* Keep consult_nh alive so the BYE/487 response callback can identify it
-       and clean up. Set consult_ended so that callback suppresses a duplicate
-       CONSULT_ENDED event. */
-    ctx->consult_ended = TRUE;
-    ctx->consult_established = FALSE;
-
-    /* Resume primary call and notify UI immediately. */
+    /* Unlike hangup, cancelling keeps the primary call: resume it from hold
+       and notify the UI immediately. */
     sofia_set_hold(ctx, 0);
     ctx->cb(SOFIA_EV_CONSULT_ENDED, 0, "Cancelled", NULL, ctx->userdata);
 }

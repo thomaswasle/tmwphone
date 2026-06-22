@@ -780,6 +780,18 @@ mod imp {
                 }
 
                 SipEvent::TransferFailed(reason) => {
+                    // The transfer was rejected. For an attended transfer the
+                    // consultation leg is still up and the primary call is still
+                    // on hold (complete_transfer leaves both legs for the server
+                    // to tear down on success). Cancel the consultation to return
+                    // the user cleanly to the original party — otherwise the
+                    // consult leg would orphan if they hang up next. This is a
+                    // no-op for a blind transfer (no consult leg), leaving the
+                    // call untouched. cancel_consultation fires CONSULT_ENDED
+                    // synchronously, re-entering handle_sip_event to exit consult
+                    // mode and unhold; that handler must not borrow
+                    // active_engines (see with_active_engine).
+                    self.with_active_engine(|e| e.cancel_consultation());
                     self.toast_overlay
                         .add_toast(error_toast(&format!("Transfer failed: {reason}")));
                 }
