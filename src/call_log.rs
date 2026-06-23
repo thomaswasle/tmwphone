@@ -149,3 +149,160 @@ pub fn format_duration(secs: u32) -> String {
         format!("{}:{:02}", secs / 60, secs % 60)
     }
 }
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── display_name ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn display_name_uses_quoted_display_name() {
+        assert_eq!(display_name("Alice <820@pbx>"), "Alice");
+        assert_eq!(display_name("\"Bob\" <sip:830@pbx>"), "Bob");
+    }
+
+    #[test]
+    fn display_name_falls_back_to_user_part() {
+        assert_eq!(display_name("<sip:840@pbx>"), "840");
+        assert_eq!(display_name("<850@pbx>"), "850");
+    }
+
+    #[test]
+    fn display_name_handles_bare_uris() {
+        assert_eq!(display_name("820@pbx"), "820");
+        assert_eq!(display_name("sip:820@pbx"), "820");
+        assert_eq!(display_name("sips:820@pbx"), "820");
+        assert_eq!(display_name("820"), "820");
+    }
+
+    // ── callable ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn callable_extracts_uri_inside_brackets() {
+        assert_eq!(callable("Alice <820@pbx>"), "820@pbx");
+        assert_eq!(callable("Name <sip:830@pbx>"), "sip:830@pbx");
+    }
+
+    #[test]
+    fn callable_passes_through_bare_numbers() {
+        assert_eq!(callable("820@pbx"), "820@pbx");
+        assert_eq!(callable("820"), "820");
+    }
+
+    // ── format_duration ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn format_duration_minutes_and_seconds() {
+        assert_eq!(format_duration(0), "0:00");
+        assert_eq!(format_duration(5), "0:05");
+        assert_eq!(format_duration(65), "1:05");
+        assert_eq!(format_duration(599), "9:59");
+    }
+
+    #[test]
+    fn format_duration_hours() {
+        assert_eq!(format_duration(3600), "1:00:00");
+        assert_eq!(format_duration(3661), "1:01:01");
+        assert_eq!(format_duration(7325), "2:02:05");
+    }
+
+    // ── parse_line ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_line_valid_record() {
+        let r = parse_line("1700000000|i|a|820@pbx|42").unwrap();
+        assert_eq!(r.direction, Direction::Incoming);
+        assert_eq!(r.status, Status::Answered);
+        assert_eq!(r.number, "820@pbx");
+        assert_eq!(r.started_at, 1_700_000_000);
+        assert_eq!(r.duration_secs, 42);
+    }
+
+    #[test]
+    fn parse_line_all_enum_variants() {
+        assert_eq!(parse_line("1|o|f|x|0").unwrap().direction, Direction::Outgoing);
+        assert_eq!(parse_line("1|o|f|x|0").unwrap().status, Status::Failed);
+        assert_eq!(parse_line("1|i|m|x|0").unwrap().status, Status::Missed);
+    }
+
+    #[test]
+    fn parse_line_rejects_malformed_input() {
+        assert!(parse_line("notanumber|i|a|x|0").is_none());
+        assert!(parse_line("1|x|a|x|0").is_none());     // bad direction
+        assert!(parse_line("1|i|x|x|0").is_none());     // bad status
+        assert!(parse_line("1|i|a|x|notanum").is_none()); // bad duration
+        assert!(parse_line("1|i|a").is_none());          // too few fields
+        assert!(parse_line("").is_none());
+    }
+
+    // ── save / load round-trip ────────────────────────────────────────────────────
+
+    fn temp_log_path() -> PathBuf {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        std::env::temp_dir().join(format!("tmwphone_test_{}_{nanos}.log", std::process::id()))
+    }
+
+    fn rec(started_at: i64, number: &str) -> Record {
+        Record {
+            direction: Direction::Outgoing,
+            status: Status::Answered,
+            number: number.to_string(),
+            started_at,
+            duration_secs: 12,
+        }
+    }
+
+    #[test]
+    fn push_persists_and_reloads_newest_first() {
+        let path = temp_log_path();
+        let mut log = CallLog { path: path.clone(), records: Vec::new() };
+
+        log.push(rec(100, "alice@pbx"));
+        log.push(rec(200, "bob@pbx"));
+
+        // Re-read from disk via the same parser load() uses.
+        let reloaded = parse_file(&path);
+        assert_eq!(reloaded.len(), 2);
+        assert_eq!(reloaded[0].number, "bob@pbx"); // newest first
+        assert_eq!(reloaded[1].number, "alice@pbx");
+        assert_eq!(reloaded[0].started_at, 200);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn push_caps_at_500_records() {
+        let path = temp_log_path();
+        let mut log = CallLog { path: path.clone(), records: Vec::new() };
+
+        for i in 0..510 {
+            log.push(rec(i, "x@pbx"));
+        }
+        assert_eq!(log.records.len(), 500);
+        // The most recent push sits at index 0.
+        assert_eq!(log.records[0].started_at, 509);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn parse_file_missing_path_is_empty() {
+        let path = temp_log_path(); // never created
+        assert!(parse_file(&path).is_empty());
+    }
+
+    // ── format_time (smoke) ────────────────────────────────────────────────────────
+
+    #[test]
+    fn format_time_today_is_hh_mm() {
+        let now = glib::DateTime::now_local().unwrap().to_unix();
+        let s = format_time(now);
+        // Today's calls render as zero-padded "HH:MM".
+        assert_eq!(s.len(), 5, "got {s:?}");
+        assert_eq!(s.as_bytes()[2], b':');
+    }
+}

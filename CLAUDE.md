@@ -24,7 +24,7 @@ RUST_LOG=debug cargo run
 
 `build.rs` runs `glib-compile-schemas data/` on every build, so changes to `data/io.github.thomaswasle.TMWPhone.gschema.xml` are picked up automatically. It also compiles `src/sip/glue.c` via the `cc` crate.
 
-There are no tests currently.
+Unit tests live in `#[cfg(test)]` modules inside the source files and run with `cargo test`. They cover the pure-logic layers — `call_log.rs` (parsing, display helpers, save/load round-trip), `accounts.rs` (transport mapping, serde defaults, legacy port migration), and `sip/mod.rs` (`friendly_call_failure`, `parse_media_aux`). The GTK/sofia/GStreamer layers are not unit-tested. Note `cargo test` still links the full sofia-sip C stack, so the system deps from `install-deps.sh` are required.
 
 ## Architecture
 

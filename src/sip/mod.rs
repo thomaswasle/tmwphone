@@ -220,6 +220,22 @@ fn friendly_call_failure(status: c_int, phrase: &str) -> String {
     }
 }
 
+/// Parse the comma-delimited media descriptor passed from the C layer
+/// (`"local_rtp_port,remote_ip,remote_rtp_port[,codec]"`) into its parts.
+/// Unparsable ports/codec degrade to 0; fewer than three fields yields `None`.
+fn parse_media_aux(s: &str) -> Option<(u16, String, u16, u8)> {
+    let parts: Vec<&str> = s.splitn(4, ',').collect();
+    if parts.len() >= 3 {
+        let local_rtp_port = parts[0].parse::<u16>().unwrap_or(0);
+        let remote_ip = parts[1].to_string();
+        let remote_rtp_port = parts[2].parse::<u16>().unwrap_or(0);
+        let codec = if parts.len() >= 4 { parts[3].parse::<u8>().unwrap_or(0) } else { 0 };
+        Some((local_rtp_port, remote_ip, remote_rtp_port, codec))
+    } else {
+        None
+    }
+}
+
 // ── C callback (always fires on the GTK main thread) ─────────────────────────
 
 unsafe extern "C" fn sofia_event_cb(
@@ -239,22 +255,13 @@ unsafe extern "C" fn sofia_event_cb(
         }
     };
 
-    let parse_media_aux = |aux: *const c_char| -> Option<(u16, String, u16, u8)> {
+    let parse_media = |aux: *const c_char| -> Option<(u16, String, u16, u8)> {
         let s = if aux.is_null() {
             String::new()
         } else {
             CStr::from_ptr(aux).to_string_lossy().into_owned()
         };
-        let parts: Vec<&str> = s.splitn(4, ',').collect();
-        if parts.len() >= 3 {
-            let local_rtp_port = parts[0].parse::<u16>().unwrap_or(0);
-            let remote_ip = parts[1].to_string();
-            let remote_rtp_port = parts[2].parse::<u16>().unwrap_or(0);
-            let codec = if parts.len() >= 4 { parts[3].parse::<u8>().unwrap_or(0) } else { 0 };
-            Some((local_rtp_port, remote_ip, remote_rtp_port, codec))
-        } else {
-            None
-        }
+        parse_media_aux(&s)
     };
 
     let ev = match event {
@@ -272,7 +279,7 @@ unsafe extern "C" fn sofia_event_cb(
         }
         ffi::SOFIA_EV_CALL_CONNECTED => Some(SipEvent::CallConnected),
         ffi::SOFIA_EV_CALL_MEDIA => {
-            if let Some((local_rtp_port, remote_ip, remote_rtp_port, codec)) = parse_media_aux(aux) {
+            if let Some((local_rtp_port, remote_ip, remote_rtp_port, codec)) = parse_media(aux) {
                 Some(SipEvent::CallMedia { local_rtp_port, remote_ip, remote_rtp_port, codec })
             } else {
                 None
@@ -286,7 +293,7 @@ unsafe extern "C" fn sofia_event_cb(
         ffi::SOFIA_EV_TRANSFER_FAILED => Some(SipEvent::TransferFailed(phrase_str())),
         ffi::SOFIA_EV_CONSULT_CONNECTED => Some(SipEvent::ConsultConnected),
         ffi::SOFIA_EV_CONSULT_MEDIA => {
-            if let Some((local_rtp_port, remote_ip, remote_rtp_port, codec)) = parse_media_aux(aux) {
+            if let Some((local_rtp_port, remote_ip, remote_rtp_port, codec)) = parse_media(aux) {
                 Some(SipEvent::ConsultMedia { local_rtp_port, remote_ip, remote_rtp_port, codec })
             } else {
                 None
@@ -299,5 +306,81 @@ unsafe extern "C" fn sofia_event_cb(
     if let Some(ev) = ev {
         log::debug!("SIP event: {ev:?}");
         cb(ev);
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn media_aux_full() {
+        assert_eq!(
+            parse_media_aux("1234,10.0.0.1,5678,8"),
+            Some((1234, "10.0.0.1".to_string(), 5678, 8))
+        );
+    }
+
+    #[test]
+    fn media_aux_without_codec_defaults_to_zero() {
+        assert_eq!(
+            parse_media_aux("1234,10.0.0.1,5678"),
+            Some((1234, "10.0.0.1".to_string(), 5678, 0))
+        );
+    }
+
+    #[test]
+    fn media_aux_too_few_fields_is_none() {
+        assert_eq!(parse_media_aux("1234,10.0.0.1"), None);
+        assert_eq!(parse_media_aux(""), None);
+    }
+
+    #[test]
+    fn media_aux_unparsable_numbers_degrade_to_zero() {
+        assert_eq!(
+            parse_media_aux("abc,10.0.0.1,xyz"),
+            Some((0, "10.0.0.1".to_string(), 0, 0))
+        );
+    }
+
+    #[test]
+    fn media_aux_extra_commas_belong_to_codec_field() {
+        // splitn(4) keeps everything after the 3rd comma in the codec slot;
+        // "8,9" is not a valid u8 and degrades to 0.
+        assert_eq!(
+            parse_media_aux("1234,10.0.0.1,5678,8,9"),
+            Some((1234, "10.0.0.1".to_string(), 5678, 0))
+        );
+    }
+
+    #[test]
+    fn dns_phrase_overrides_status_with_routing_hint() {
+        let msg = friendly_call_failure(503, "DNS Error");
+        assert!(msg.contains("could not be"));
+        assert!(msg.to_ascii_lowercase().contains("resolved"));
+        // The dns branch wins regardless of status code.
+        assert_eq!(friendly_call_failure(486, "dns lookup failed"), msg);
+    }
+
+    #[test]
+    fn known_status_codes_map_to_friendly_text() {
+        assert!(friendly_call_failure(401, "Unauthorized").contains("Authentication failed"));
+        assert!(friendly_call_failure(407, "Proxy Auth").contains("Authentication failed"));
+        assert!(friendly_call_failure(403, "Forbidden").contains("forbidden"));
+        assert_eq!(friendly_call_failure(404, "Not Found"), "Number not found.");
+        assert!(friendly_call_failure(408, "Timeout").contains("timed out"));
+        assert!(friendly_call_failure(480, "Unavailable").contains("unavailable"));
+        assert!(friendly_call_failure(486, "Busy Here").contains("busy"));
+        assert!(friendly_call_failure(600, "Busy Everywhere").contains("busy"));
+        assert!(friendly_call_failure(603, "Decline").contains("declined"));
+    }
+
+    #[test]
+    fn unmapped_status_codes_fall_through() {
+        assert_eq!(friendly_call_failure(500, "Server Error"), "Server error (500 Server Error).");
+        assert_eq!(friendly_call_failure(481, "Call Leg Done"), "481 Call Leg Done");
+        assert_eq!(friendly_call_failure(0, "local failure"), "local failure");
     }
 }
