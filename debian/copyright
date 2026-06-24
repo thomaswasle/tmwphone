@@ -6,6 +6,17 @@ Source: https://github.com/thomaswasle/tmwphone
 Files: *
 Copyright: 2026 Thomas Müller-Wasle <mueller@loca.net>
 License: Apache-2.0
+Comment:
+ TMWPhone links at runtime against several third-party libraries that are
+ packaged and licensed separately by Debian and are NOT included in this
+ source package:
+ .
+   * sofia-sip (libsofia-sip-ua, libsofia-sip-ua-glib) — LGPL-2.1+
+   * GTK 4, libadwaita, GLib/GIO — LGPL-2.1+
+   * GStreamer and its base/good plugin sets — LGPL-2.1+
+   * libsecret — LGPL-2.1+
+ .
+ Their license texts are shipped with their respective Debian packages.
 
 License: Apache-2.0
  Licensed under the Apache License, Version 2.0 (the "License");

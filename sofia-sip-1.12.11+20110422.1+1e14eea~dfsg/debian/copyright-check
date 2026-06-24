@@ -1,3 +1,0 @@
-#!/bin/sh
-
-licensecheck --check '.*' --recursive --copyright --deb-machine --ignore '^(debian/(changelog|copyright(_hints)?))$' --lines 0 -- * > debian/copyright_hints
