@@ -15,6 +15,7 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <time.h>
 
 /* ── Internal context ─────────────────────────────────────────────────────── */
 
@@ -43,6 +44,23 @@ struct SofiaCtx {
     char              remote_rtp_ip[64];
     int               remote_rtp_port;
     int               remote_rtp_payload; /* selected RTP payload type (0=PCMU, 8=PCMA) */
+
+    /* SDP origin (o=) line.  sess_id stays constant for the process; version
+       MUST increase on every offer/answer we emit, otherwise a re-INVITE that
+       only changes the media direction (e.g. active→sendonly for hold) is seen
+       by the peer's SDP negotiator (Asterisk/pjmedia) as "no change" and the
+       hold / music-on-hold transition is silently dropped.  RFC 3264 §8. */
+    unsigned int      sdp_sess_id;
+    unsigned int      sdp_version;
+
+    /* Declined (port-0) m-lines mirroring every non-audio stream the remote
+       offered on the primary call, e.g. "m=video 0 RTP/AVP 99\r\n".  RFC 3264
+       §6 requires answers — and every subsequent offer in the dialog — to keep
+       the same m-line count and order, with rejected streams at port 0.  We
+       only do audio, so we must re-emit the others as declined rather than drop
+       them: omitting the video m-line desyncs Asterisk/pjmedia's stream map and
+       silently breaks the hold → music-on-hold transition. */
+    char              remote_decl_media[256];
 
     gboolean          reg_auth_tried;   /* true after one auth attempt in the current REGISTER cycle */
     gboolean          call_auth_tried;  /* true after first digest attempt */
@@ -243,15 +261,66 @@ static void ensure_local_ip(SofiaCtx *ctx) {
                         "media (network down?); call audio will not work\n");
 }
 
+/* Parse the offer in `sip` and write a declined (port-0) m-line for every
+   non-audio stream into `out`, e.g. "m=video 0 RTP/AVP 99\r\n".  RFC 3264 §6
+   requires an answer (and every later offer in the dialog) to keep the offer's
+   m-line count and order, with unwanted streams set to port 0 — not removed.
+   We only do audio, so we must echo the rest as declined.  `out` is emptied
+   first, so an audio-only offer leaves it "". */
+static void capture_declined_media(sip_t const *sip, char *out, size_t len) {
+    if (len == 0) return;
+    out[0] = '\0';
+    if (!sip || !sip->sip_payload || !sip->sip_payload->pl_data)
+        return;
+
+    su_home_t home[1];
+    su_home_init(home);
+
+    sdp_parser_t *p = sdp_parse(home, sip->sip_payload->pl_data,
+                                (int)sip->sip_payload->pl_len, 0);
+    sdp_session_t const *sdp = p ? sdp_session(p) : NULL;
+    if (sdp) {
+        size_t n = 0;
+        for (sdp_media_t const *m = sdp->sdp_media; m && n < len; m = m->m_next) {
+            if (m->m_type == sdp_media_audio)
+                continue;
+            const char *type  = m->m_type_name  ? m->m_type_name  : "video";
+            const char *proto = m->m_proto_name ? m->m_proto_name : "RTP/AVP";
+            n += snprintf(out + n, len - n, "m=%s 0 %s", type, proto);
+            int wrote_fmt = 0;
+            for (sdp_rtpmap_t const *rm = m->m_rtpmaps; rm && n < len; rm = rm->rm_next) {
+                n += snprintf(out + n, len - n, " %u", (unsigned)rm->rm_pt);
+                wrote_fmt = 1;
+            }
+            if (!wrote_fmt && n < len) /* at least one format token is required */
+                n += snprintf(out + n, len - n, " 0");
+            if (n < len)
+                n += snprintf(out + n, len - n, "\r\n");
+        }
+    }
+
+    su_home_deinit(home);
+}
+
 /* Build an SDP offer/answer for ctx->local_ip:port.
    direction is "sendrecv", "sendonly", or "recvonly".
-   port is the local RTP port to advertise. */
+   port is the local RTP port to advertise.
+   extra_media, if non-NULL, is appended verbatim after the audio block — used
+   to carry declined (port-0) m-lines so the m-line topology stays in sync with
+   the offer (see capture_declined_media). */
 static void build_audio_sdp(SofiaCtx *ctx, char *buf, size_t len,
-                             const char *direction, int port) {
+                             const char *direction, int port,
+                             const char *extra_media) {
     ensure_local_ip(ctx);
+    /* Stable session id, monotonically increasing version (see struct comment).
+       Bumping the version on every build guarantees each successive offer in a
+       dialog differs, so the peer re-negotiates the new direction. */
+    if (ctx->sdp_sess_id == 0)
+        ctx->sdp_sess_id = (unsigned int)time(NULL);
+    ctx->sdp_version++;
     snprintf(buf, len,
         "v=0\r\n"
-        "o=- 0 0 IN IP4 %s\r\n"
+        "o=- %u %u IN IP4 %s\r\n"
         "s=-\r\n"
         "c=IN IP4 %s\r\n"
         "t=0 0\r\n"
@@ -261,8 +330,10 @@ static void build_audio_sdp(SofiaCtx *ctx, char *buf, size_t len,
         "a=rtpmap:101 telephone-event/8000\r\n"
         "a=fmtp:101 0-15\r\n"
         "a=ptime:20\r\n"
-        "a=%s\r\n",
-        ctx->local_ip, ctx->local_ip, port, direction);
+        "a=%s\r\n"
+        "%s",
+        ctx->sdp_sess_id, ctx->sdp_version, ctx->local_ip, ctx->local_ip,
+        port, direction, extra_media ? extra_media : "");
 }
 
 /* ── Auth helpers ─────────────────────────────────────────────────────────── */
@@ -462,7 +533,7 @@ static void invite_with_digest(SofiaCtx *ctx, sip_t const *sip, int status)
 
                 ctx->local_rtp_port = get_free_udp_port();
                 char sdp[512];
-                build_audio_sdp(ctx, sdp, sizeof(sdp), "sendrecv", ctx->local_rtp_port);
+                build_audio_sdp(ctx, sdp, sizeof(sdp), "sendrecv", ctx->local_rtp_port, "");
 
                 /* SIPTAG_CONTACT_STR hier in beide Zweige eingefügt: */
                 if (status == 401)
@@ -586,7 +657,7 @@ static void consult_with_digest(SofiaCtx *ctx, sip_t const *sip, int status)
 
     ctx->consult_local_rtp_port = get_free_udp_port();
     char sdp[512];
-    build_audio_sdp(ctx, sdp, sizeof(sdp), "sendrecv", ctx->consult_local_rtp_port);
+    build_audio_sdp(ctx, sdp, sizeof(sdp), "sendrecv", ctx->consult_local_rtp_port, "");
 
     char contact[512];
     build_contact(ctx, contact, sizeof(contact));
@@ -706,8 +777,13 @@ static void nua_cb(nua_event_t event, int status, char const *phrase,
             extract_rtp_into(ctx, sip,
                              ctx->remote_rtp_ip, sizeof(ctx->remote_rtp_ip),
                              &ctx->remote_rtp_port, &ctx->remote_rtp_payload);
+            /* Re-capture declined m-lines from this offer so the answer mirrors
+               the current stream topology (RFC 3264 §6). */
+            capture_declined_media(sip, ctx->remote_decl_media,
+                                   sizeof(ctx->remote_decl_media));
             char sdp[512];
-            build_audio_sdp(ctx, sdp, sizeof(sdp), "sendrecv", ctx->local_rtp_port);
+            build_audio_sdp(ctx, sdp, sizeof(sdp), "sendrecv", ctx->local_rtp_port,
+                            ctx->remote_decl_media);
             nua_respond(ctx->call_nh, SIP_200_OK,
                         SIPTAG_CONTENT_TYPE_STR("application/sdp"),
                         SIPTAG_PAYLOAD_STR(sdp),
@@ -737,6 +813,11 @@ static void nua_cb(nua_event_t event, int status, char const *phrase,
         extract_rtp_into(ctx, sip,
                          ctx->remote_rtp_ip, sizeof(ctx->remote_rtp_ip),
                          &ctx->remote_rtp_port, &ctx->remote_rtp_payload);
+        /* Remember any non-audio streams (e.g. video) the caller offered so our
+           answer and later re-INVITEs decline them with port 0 instead of
+           dropping the m-line, which desyncs Asterisk and breaks hold/MOH. */
+        capture_declined_media(sip, ctx->remote_decl_media,
+                               sizeof(ctx->remote_decl_media));
 
         char from_buf[256] = {0};
         if (sip && sip->sip_from) {
@@ -1218,9 +1299,12 @@ void sofia_call(SofiaCtx *ctx, const char *number) {
     ctx->call_on_hold     = FALSE;
     ctx->transfer_in_progress = FALSE;
     ctx->local_rtp_port   = get_free_udp_port();
+    /* Outgoing call: we offer audio only, so no declined streams.  Clear any
+       value left over from a previous (incoming) call. */
+    ctx->remote_decl_media[0] = '\0';
 
     char sdp[512];
-    build_audio_sdp(ctx, sdp, sizeof(sdp), "sendrecv", ctx->local_rtp_port);
+    build_audio_sdp(ctx, sdp, sizeof(sdp), "sendrecv", ctx->local_rtp_port, "");
 
     char to[512], from[512];
     if (strncmp(number, "sip:", 4) == 0 || strncmp(number, "sips:", 5) == 0)
@@ -1256,7 +1340,9 @@ void sofia_answer(SofiaCtx *ctx) {
     ctx->transfer_in_progress = FALSE;
     ctx->local_rtp_port = get_free_udp_port();
     char sdp[512];
-    build_audio_sdp(ctx, sdp, sizeof(sdp), "sendrecv", ctx->local_rtp_port);
+    /* Mirror the streams the caller offered, declining the non-audio ones. */
+    build_audio_sdp(ctx, sdp, sizeof(sdp), "sendrecv", ctx->local_rtp_port,
+                    ctx->remote_decl_media);
 
     nua_respond(ctx->call_nh, SIP_200_OK,
                 SIPTAG_CONTENT_TYPE_STR("application/sdp"),
@@ -1314,8 +1400,11 @@ void sofia_set_hold(SofiaCtx *ctx, int hold) {
     if (!ctx->call_nh || !ctx->call_established) return;
     ctx->call_on_hold = hold ? TRUE : FALSE;
     char sdp[512];
+    /* Keep the declined streams in the re-INVITE: a hold offer with fewer
+       m-lines than the established session desyncs Asterisk's stream map. */
     build_audio_sdp(ctx, sdp, sizeof(sdp),
-                    hold ? "sendonly" : "sendrecv", ctx->local_rtp_port);
+                    hold ? "sendonly" : "sendrecv", ctx->local_rtp_port,
+                    ctx->remote_decl_media);
     char contact[512];
     build_contact(ctx, contact, sizeof(contact));
     nua_invite(ctx->call_nh,
@@ -1356,7 +1445,7 @@ void sofia_start_consultation(SofiaCtx *ctx, const char *number) {
     ctx->consult_local_rtp_port = get_free_udp_port();
 
     char sdp[512];
-    build_audio_sdp(ctx, sdp, sizeof(sdp), "sendrecv", ctx->consult_local_rtp_port);
+    build_audio_sdp(ctx, sdp, sizeof(sdp), "sendrecv", ctx->consult_local_rtp_port, "");
 
     char to[512], from[512];
     if (strncmp(number, "sip:", 4) == 0 || strncmp(number, "sips:", 5) == 0)

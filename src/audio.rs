@@ -1,12 +1,18 @@
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gtk4::{gio, glib};
+use std::cell::Cell;
 
 pub struct AudioSession {
     send: gst::Pipeline,
     recv: gst::Pipeline,
-    // `volume` element on the send path; its `mute` property toggles the mic.
+    // `volume` element on the send path; its `mute` property silences the mic.
+    // Both user-mute and hold silence it (see `apply_mute`).
     send_volume: gst::Element,
+    // The mic is silenced when the user muted it OR the call is on hold; these
+    // two inputs are tracked separately and OR'd together in `apply_mute`.
+    user_muted: Cell<bool>,
+    on_hold: Cell<bool>,
     // Bus watches remove themselves when their guard is dropped, so they must
     // be held for the lifetime of the session — otherwise pipeline errors and
     // warnings go unreported.
@@ -110,8 +116,9 @@ impl AudioSession {
         // ── Send pipeline ────────────────────────────────────────────────────
 
         let audio_in  = make("autoaudiosrc")?;
-        // `volume` sits right after the source so muting silences the mic
-        // independently of hold (which pauses the whole send pipeline).
+        // `volume` sits right after the source so silencing the mic (user mute
+        // or hold) replaces live audio with encoded silence while RTP keeps
+        // flowing — see `apply_mute` / `set_hold`.
         let volume    = make("volume")?;
         let aconv_s   = make("audioconvert")?;
         let aresamp   = make("audioresample")?;
@@ -185,19 +192,44 @@ impl AudioSession {
         recv.set_state(gst::State::Playing)
             .map_err(|e| format!("recv PLAY: {e:?}"))?;
 
-        Ok(AudioSession { send, recv, send_volume: volume, _bus_watches: bus_watches })
+        Ok(AudioSession {
+            send,
+            recv,
+            send_volume: volume,
+            user_muted: Cell::new(false),
+            on_hold: Cell::new(false),
+            _bus_watches: bus_watches,
+        })
     }
 
+    /// Silence the mic on the `volume` element when either the user has muted
+    /// the call or it is on hold.  The send pipeline keeps PLAYING in both
+    /// cases, so RTP (now carrying silence) keeps flowing.
+    fn apply_mute(&self) {
+        let silence = self.user_muted.get() || self.on_hold.get();
+        self.send_volume.set_property("mute", silence);
+    }
+
+    /// Put the call on hold (or resume it).
+    ///
+    /// We keep the send pipeline PLAYING and stream silence rather than pausing
+    /// it.  The SDP we offer for hold is `a=sendonly` — we promise to keep
+    /// sending — and Asterisk relies on a steady RTP stream from the held leg
+    /// to drive smooth music-on-hold toward the other party and to keep its
+    /// comedia / symmetric-RTP latch alive.  Pausing the pipeline stops RTP
+    /// entirely, which makes MOH stutter or never start, and the pause/resume
+    /// timestamp gap garbles audio on un-hold.
     pub fn set_hold(&self, hold: bool) {
-        let state = if hold { gst::State::Paused } else { gst::State::Playing };
-        let _ = self.send.set_state(state);
+        self.on_hold.set(hold);
+        self.apply_mute();
     }
 
-    /// Mute or unmute the outgoing microphone audio.  Independent of hold:
-    /// the `volume` element stays in the pipeline, so toggling mute works
-    /// whether or not the call is on hold.
+    /// Mute or unmute the outgoing microphone audio.  Independent of hold: both
+    /// share the `volume` element, so a resume won't un-silence a user-muted
+    /// call and an unmute won't un-silence a held one.
     pub fn set_muted(&self, muted: bool) {
-        self.send_volume.set_property("mute", muted);
+        self.user_muted.set(muted);
+        self.apply_mute();
     }
 }
 
