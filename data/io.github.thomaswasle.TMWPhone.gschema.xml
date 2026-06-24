@@ -38,5 +38,10 @@
       <summary>Display name of the secondary audio output device used for the ringer (empty = disabled)</summary>
     </key>
 
+    <key name="default-account" type="s">
+      <default>''</default>
+      <summary>Account id used for outgoing calls</summary>
+    </key>
+
   </schema>
 </schemalist>

@@ -1,5 +1,4 @@
 use gtk4::{glib, prelude::*, subclass::prelude::*, CompositeTemplate};
-use std::cell::RefCell;
 
 mod imp {
     use super::*;
@@ -12,10 +11,6 @@ mod imp {
         pub number_entry: TemplateChild<gtk4::Entry>,
         #[template_child]
         pub call_button: TemplateChild<gtk4::Button>,
-        #[template_child]
-        pub account_selector: TemplateChild<gtk4::DropDown>,
-
-        pub account_ids: RefCell<Vec<String>>,
     }
 
     #[glib::object_subclass]
@@ -82,15 +77,9 @@ mod imp {
             if number.is_empty() {
                 return;
             }
-            let account_id = {
-                let ids = self.account_ids.borrow();
-                if self.account_selector.is_visible() {
-                    let idx = self.account_selector.selected() as usize;
-                    ids.get(idx).cloned().unwrap_or_default()
-                } else {
-                    ids.first().cloned().unwrap_or_default()
-                }
-            };
+            // The outgoing account is chosen globally in the window header bar, so
+            // pass an empty account_id and let MainWindow resolve it.
+            let account_id = String::new();
             self.obj()
                 .emit_by_name::<()>("call-requested", &[&number, &account_id]);
         }
@@ -114,18 +103,6 @@ impl Dialpad {
 
     pub fn clear(&self) {
         self.imp().number_entry.set_text("");
-    }
-
-    /// Update the account selector. Pass all currently registered accounts as
-    /// (account_id, display_label) pairs. The selector is hidden when ≤ 1.
-    pub fn set_registered_accounts(&self, accounts: Vec<(String, String)>) {
-        let imp = self.imp();
-        let labels: Vec<&str> = accounts.iter().map(|(_, l)| l.as_str()).collect();
-        let model = gtk4::StringList::new(&labels);
-        imp.account_selector.set_model(Some(&model));
-        *imp.account_ids.borrow_mut() = accounts.into_iter().map(|(id, _)| id).collect();
-        imp.account_selector
-            .set_visible(imp.account_ids.borrow().len() > 1);
     }
 }
 

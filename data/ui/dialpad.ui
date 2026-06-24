@@ -9,14 +9,6 @@
     <property name="margin-start">24</property>
     <property name="margin-end">24</property>
 
-    <!-- Account selector (hidden when only one account registered) -->
-    <child>
-      <object class="GtkDropDown" id="account_selector">
-        <property name="visible">false</property>
-        <property name="hexpand">true</property>
-      </object>
-    </child>
-
     <!-- Number entry -->
     <child>
       <object class="GtkBox">

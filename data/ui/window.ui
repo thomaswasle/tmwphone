@@ -21,6 +21,12 @@
 
                 <child type="top">
                   <object class="AdwHeaderBar">
+                    <child type="start">
+                      <object class="GtkDropDown" id="account_selector">
+                        <property name="visible">false</property>
+                        <property name="tooltip-text">Account used for outgoing calls</property>
+                      </object>
+                    </child>
                     <child type="end">
                       <object class="GtkMenuButton">
                         <property name="icon-name">open-menu-symbolic</property>

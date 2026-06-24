@@ -1,4 +1,4 @@
-use std::cell::{OnceCell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 
 use gtk4::{gio, glib, prelude::*, subclass::prelude::*, CompositeTemplate};
 use libadwaita as adw;
@@ -45,6 +45,14 @@ mod imp {
         pub call_revealer: TemplateChild<gtk4::Revealer>,
         #[template_child]
         pub toast_overlay: TemplateChild<adw::ToastOverlay>,
+        #[template_child]
+        pub account_selector: TemplateChild<gtk4::DropDown>,
+
+        /// account_id for each entry in `account_selector` (parallel to its model).
+        pub selector_account_ids: RefCell<Vec<String>>,
+        /// Guards `account_selector`'s notify handler while we repopulate it, so
+        /// programmatic `set_selected` does not clobber the persisted default.
+        pub suppress_account_save: Cell<bool>,
 
         pub dialpad: OnceCell<Dialpad>,
         pub call_screen: OnceCell<CallScreen>,
@@ -204,6 +212,23 @@ mod imp {
                 ),
             );
             self.dialpad.set(dialpad).unwrap();
+
+            // ── Header-bar account selector ───────────────────────────────────
+            // Persist the chosen outgoing account whenever the user changes it.
+            self.account_selector.connect_selected_notify(glib::clone!(
+                #[weak]
+                obj,
+                move |_| {
+                    let imp = obj.imp();
+                    if imp.suppress_account_save.get() {
+                        return;
+                    }
+                    if let Some(id) = imp.selected_outgoing_account_id() {
+                        let settings = gio::Settings::new("io.github.thomaswasle.TMWPhone");
+                        let _ = settings.set_string("default-account", &id);
+                    }
+                }
+            ));
 
             // ── Call screen ───────────────────────────────────────────────────
 
@@ -523,7 +548,7 @@ mod imp {
             self.active_engines
                 .borrow_mut()
                 .retain(|e| e.account_id != account_id);
-            self.refresh_dialpad_accounts();
+            self.refresh_account_selector();
         }
 
         pub fn connect_account_by_id(&self, account_id: &str) {
@@ -593,10 +618,10 @@ mod imp {
             *self.keepalive_timer.borrow_mut() = Some(id);
         }
 
-        fn refresh_dialpad_accounts(&self) {
-            let Some(dialpad) = self.dialpad.get() else {
-                return;
-            };
+        /// Repopulate the header-bar account selector with the currently
+        /// registered accounts and restore the persisted default selection.
+        /// Hidden when ≤ 1 account is registered.
+        fn refresh_account_selector(&self) {
             let accounts = crate::accounts::load();
             let registered: Vec<(String, String)> = self
                 .active_engines
@@ -610,7 +635,31 @@ mod imp {
                         .map(|a| (a.id.clone(), a.label()))
                 })
                 .collect();
-            dialpad.set_registered_accounts(registered);
+
+            let labels: Vec<&str> = registered.iter().map(|(_, l)| l.as_str()).collect();
+            let model = gtk4::StringList::new(&labels);
+            let ids: Vec<String> = registered.into_iter().map(|(id, _)| id).collect();
+
+            // Restore the persisted default if it is still registered, else index 0.
+            let settings = gio::Settings::new("io.github.thomaswasle.TMWPhone");
+            let saved = settings.string("default-account");
+            let selected = ids
+                .iter()
+                .position(|id| id == saved.as_str())
+                .unwrap_or(0) as u32;
+
+            self.suppress_account_save.set(true);
+            self.account_selector.set_model(Some(&model));
+            self.account_selector.set_selected(selected);
+            self.account_selector.set_visible(ids.len() > 1);
+            *self.selector_account_ids.borrow_mut() = ids;
+            self.suppress_account_save.set(false);
+        }
+
+        /// The account_id currently chosen in the header-bar selector, if any.
+        fn selected_outgoing_account_id(&self) -> Option<String> {
+            let ids = self.selector_account_ids.borrow();
+            ids.get(self.account_selector.selected() as usize).cloned()
         }
 
         // ── SIP event handler ─────────────────────────────────────────────────
@@ -650,7 +699,7 @@ mod imp {
                             toast.set_timeout(4);
                             self.toast_overlay.add_toast(toast);
                         }
-                        self.refresh_dialpad_accounts();
+                        self.refresh_account_selector();
                     }
                 }
 
@@ -671,7 +720,7 @@ mod imp {
                         .set_title(&format!("{label}: Registration failed: {reason}"));
                     self.status_banner.set_button_label(Some("Reconnect"));
                     self.status_banner.set_revealed(true);
-                    self.refresh_dialpad_accounts();
+                    self.refresh_account_selector();
                 }
 
                 SipEvent::IncomingCall { from } => {
@@ -836,20 +885,26 @@ mod imp {
         }
 
         pub fn start_call(&self, number: &str, account_id: &str) {
-            // Find the right engine: explicit account first, else first registered.
-            let chosen_id = {
-                let engines = self.active_engines.borrow();
-                if !account_id.is_empty() {
-                    engines
-                        .iter()
-                        .find(|e| e.account_id == account_id && e.registered)
-                        .map(|e| e.account_id.clone())
-                } else {
-                    engines
-                        .iter()
-                        .find(|e| e.registered)
-                        .map(|e| e.account_id.clone())
-                }
+            // Resolve the outgoing engine: an explicit account_id wins; otherwise
+            // use the header-bar selection; otherwise fall back to first registered.
+            let is_registered = |id: &str| {
+                self.active_engines
+                    .borrow()
+                    .iter()
+                    .any(|e| e.account_id == id && e.registered)
+            };
+            let chosen_id = if !account_id.is_empty() && is_registered(account_id) {
+                Some(account_id.to_string())
+            } else {
+                self.selected_outgoing_account_id()
+                    .filter(|id| is_registered(id))
+                    .or_else(|| {
+                        self.active_engines
+                            .borrow()
+                            .iter()
+                            .find(|e| e.registered)
+                            .map(|e| e.account_id.clone())
+                    })
             };
 
             let Some(id) = chosen_id else {
