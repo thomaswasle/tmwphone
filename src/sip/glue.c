@@ -109,6 +109,24 @@ static const char *sip_scheme(const SofiaCtx *ctx) {
     return ctx->transport == TRANSPORT_TLS ? "sips" : "sip";
 }
 
+/* Build a SIP target URI from a dialled string into `buf`:
+ *   "sip:..."/"sips:..."  -> verbatim (already a full URI)
+ *   "user@host"           -> scheme prepended, host kept as dialled
+ *   "887"                 -> scheme + "@" + account server appended
+ * The middle case is essential for call-back from the call log, where the
+ * stored From-URI is e.g. "887@10.239.11.17"; appending @server there would
+ * yield a malformed double-@ request-URI that Asterisk rejects with a
+ * "Request Line" syntax error. */
+static void build_target_uri(const SofiaCtx *ctx, const char *number,
+                             char *buf, size_t buflen) {
+    if (strncmp(number, "sip:", 4) == 0 || strncmp(number, "sips:", 5) == 0)
+        snprintf(buf, buflen, "%s", number);
+    else if (strchr(number, '@') != NULL)
+        snprintf(buf, buflen, "%s:%s", sip_scheme(ctx), number);
+    else
+        snprintf(buf, buflen, "%s:%s@%s", sip_scheme(ctx), number, ctx->server);
+}
+
 /* Returns ";transport=tcp" for TCP, "" for UDP and TLS (TLS uses sips: scheme). */
 static const char *transport_param(const SofiaCtx *ctx) {
     return ctx->transport == TRANSPORT_TCP ? ";transport=tcp" : "";
@@ -1307,10 +1325,7 @@ void sofia_call(SofiaCtx *ctx, const char *number) {
     build_audio_sdp(ctx, sdp, sizeof(sdp), "sendrecv", ctx->local_rtp_port, "");
 
     char to[512], from[512];
-    if (strncmp(number, "sip:", 4) == 0 || strncmp(number, "sips:", 5) == 0)
-        snprintf(to, sizeof(to), "%s", number);
-    else
-        snprintf(to, sizeof(to), "%s:%s@%s", sip_scheme(ctx), number, ctx->server);
+    build_target_uri(ctx, number, to, sizeof(to));
     snprintf(from, sizeof(from), "<%s:%s@%s>", sip_scheme(ctx), ctx->user, ctx->server);
 
     char contact[512];
@@ -1426,11 +1441,9 @@ void sofia_send_dtmf(SofiaCtx *ctx, char digit) {
 
 void sofia_blind_transfer(SofiaCtx *ctx, const char *number) {
     if (!ctx->call_nh || !ctx->call_established) return;
-    char to[512];
-    if (strncmp(number, "sip:", 4) == 0 || strncmp(number, "sips:", 5) == 0)
-        snprintf(to, sizeof(to), "<%s>", number);
-    else
-        snprintf(to, sizeof(to), "<%s:%s@%s>", sip_scheme(ctx), number, ctx->server);
+    char to[512], uri[512];
+    build_target_uri(ctx, number, uri, sizeof(uri));
+    snprintf(to, sizeof(to), "<%s>", uri);
     nua_refer(ctx->call_nh, SIPTAG_REFER_TO_STR(to), TAG_END());
 }
 
@@ -1448,10 +1461,7 @@ void sofia_start_consultation(SofiaCtx *ctx, const char *number) {
     build_audio_sdp(ctx, sdp, sizeof(sdp), "sendrecv", ctx->consult_local_rtp_port, "");
 
     char to[512], from[512];
-    if (strncmp(number, "sip:", 4) == 0 || strncmp(number, "sips:", 5) == 0)
-        snprintf(to, sizeof(to), "%s", number);
-    else
-        snprintf(to, sizeof(to), "%s:%s@%s", sip_scheme(ctx), number, ctx->server);
+    build_target_uri(ctx, number, to, sizeof(to));
     snprintf(from, sizeof(from), "<%s:%s@%s>", sip_scheme(ctx), ctx->user, ctx->server);
 
     free(ctx->consult_to);
