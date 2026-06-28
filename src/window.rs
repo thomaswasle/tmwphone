@@ -47,6 +47,10 @@ mod imp {
         pub toast_overlay: TemplateChild<adw::ToastOverlay>,
         #[template_child]
         pub account_selector: TemplateChild<gtk4::DropDown>,
+        #[template_child]
+        pub quickdial_scroll: TemplateChild<gtk4::ScrolledWindow>,
+        #[template_child]
+        pub quickdial_bar: TemplateChild<gtk4::Box>,
 
         /// account_id for each entry in `account_selector` (parallel to its model).
         pub selector_account_ids: RefCell<Vec<String>>,
@@ -212,6 +216,10 @@ mod imp {
                 ),
             );
             self.dialpad.set(dialpad).unwrap();
+
+            // ── Quickdial bar ─────────────────────────────────────────────────
+
+            self.refresh_quickdials();
 
             // ── Header-bar account selector ───────────────────────────────────
             // Persist the chosen outgoing account whenever the user changes it.
@@ -654,6 +662,37 @@ mod imp {
             self.account_selector.set_visible(ids.len() > 1);
             *self.selector_account_ids.borrow_mut() = ids;
             self.suppress_account_save.set(false);
+        }
+
+        /// Rebuild the always-visible quickdial bar from the saved entries.
+        /// Each button dials its number immediately. The bar is hidden when no
+        /// quickdials are configured. Called on startup and after the settings
+        /// dialog (where quickdials are edited) closes.
+        pub fn refresh_quickdials(&self) {
+            let bar = self.quickdial_bar.get();
+            while let Some(child) = bar.first_child() {
+                bar.remove(&child);
+            }
+
+            let entries = crate::quickdial::load();
+            for entry in &entries {
+                if entry.number.is_empty() {
+                    continue;
+                }
+                let button = gtk4::Button::with_label(&entry.display_label());
+                button.set_tooltip_text(Some(&entry.number));
+                button.add_css_class("pill");
+                let number = entry.number.clone();
+                let weak = self.obj().downgrade();
+                button.connect_clicked(move |_| {
+                    if let Some(obj) = weak.upgrade() {
+                        obj.imp().start_call(&number, "");
+                    }
+                });
+                bar.append(&button);
+            }
+
+            self.quickdial_scroll.set_visible(bar.first_child().is_some());
         }
 
         /// The account_id currently chosen in the header-bar selector, if any.
@@ -1122,6 +1161,13 @@ impl MainWindow {
                 }
             ),
         );
+
+        // Quickdials are edited in the dialog; rebuild the bar once it closes.
+        dialog.connect_closed(glib::clone!(
+            #[weak]
+            win,
+            move |_| win.imp().refresh_quickdials()
+        ));
 
         dialog.present(Some(self));
     }
