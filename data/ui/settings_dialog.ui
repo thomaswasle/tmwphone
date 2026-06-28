@@ -13,6 +13,12 @@
       </object>
     </child>
     <child>
+      <object class="AdwPreferencesPage" id="quickdials_page">
+        <property name="title">Quickdial</property>
+        <property name="icon-name">starred-symbolic</property>
+      </object>
+    </child>
+    <child>
       <object class="AdwPreferencesPage">
         <property name="title">Audio</property>
         <property name="icon-name">audio-headphones-symbolic</property>

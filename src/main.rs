@@ -4,6 +4,7 @@ mod audio;
 mod call_log;
 mod config;
 mod keyring;
+mod quickdial;
 mod ringer;
 mod sip;
 mod widgets;

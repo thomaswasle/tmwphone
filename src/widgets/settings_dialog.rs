@@ -15,9 +15,12 @@ mod imp {
         #[template_child]
         pub accounts_page: TemplateChild<adw::PreferencesPage>,
         #[template_child]
+        pub quickdials_page: TemplateChild<adw::PreferencesPage>,
+        #[template_child]
         pub ringer_device_row: TemplateChild<adw::ComboRow>,
 
         pub accounts_group: RefCell<Option<adw::PreferencesGroup>>,
+        pub quickdials_group: RefCell<Option<adw::PreferencesGroup>>,
         pub registered_ids: RefCell<HashSet<String>>,
     }
 
@@ -332,6 +335,121 @@ mod imp {
             row
         }
 
+        pub fn build_quickdials_ui(&self) {
+            let group = adw::PreferencesGroup::new();
+            group.set_title("Quickdial Keys");
+            group.set_description(Some(
+                "Always-visible buttons that dial a number with one tap.",
+            ));
+
+            let add_btn = gtk4::Button::from_icon_name("list-add-symbolic");
+            add_btn.set_tooltip_text(Some("Add quickdial"));
+            add_btn.add_css_class("flat");
+            group.set_header_suffix(Some(&add_btn));
+
+            for entry in &crate::quickdial::load() {
+                group.add(&self.make_quickdial_row(entry));
+            }
+
+            self.quickdials_page.add(&group);
+            *self.quickdials_group.borrow_mut() = Some(group);
+
+            let obj = self.obj();
+            add_btn.connect_clicked(glib::clone!(
+                #[weak]
+                obj,
+                move |_| obj.imp().add_new_quickdial()
+            ));
+        }
+
+        pub fn make_quickdial_row(
+            &self,
+            entry: &crate::quickdial::QuickDial,
+        ) -> adw::ExpanderRow {
+            let id = entry.id.clone();
+
+            let row = adw::ExpanderRow::new();
+            row.set_title(&entry.display_label());
+            row.set_subtitle(&entry.number);
+
+            let del_btn = gtk4::Button::from_icon_name("user-trash-symbolic");
+            del_btn.add_css_class("flat");
+            del_btn.set_valign(gtk4::Align::Center);
+            del_btn.set_tooltip_text(Some("Delete quickdial"));
+            row.add_suffix(&del_btn);
+
+            let label_row = adw::EntryRow::new();
+            label_row.set_title("Label");
+            label_row.set_text(&entry.label);
+            row.add_row(&label_row);
+
+            let number_row = adw::EntryRow::new();
+            number_row.set_title("Number");
+            number_row.set_text(&entry.number);
+            row.add_row(&number_row);
+
+            let save_row = adw::ButtonRow::new();
+            save_row.set_title("Save");
+            save_row.add_css_class("suggested-action");
+            row.add_row(&save_row);
+
+            let obj = self.obj();
+
+            // Delete button
+            let id_del = id.clone();
+            del_btn.connect_clicked(glib::clone!(
+                #[weak]
+                obj,
+                #[weak]
+                row,
+                move |_| {
+                    let mut entries = crate::quickdial::load();
+                    entries.retain(|e| e.id != id_del);
+                    crate::quickdial::save(&entries);
+                    let group = obj.imp().quickdials_group.borrow();
+                    if let Some(group) = group.as_ref() {
+                        group.remove(&row);
+                    }
+                }
+            ));
+
+            // Save button
+            let id_save = id.clone();
+            save_row.connect_activated(glib::clone!(
+                #[weak]
+                label_row,
+                #[weak]
+                number_row,
+                #[weak]
+                row,
+                move |_| {
+                    let mut entries = crate::quickdial::load();
+                    if let Some(e) = entries.iter_mut().find(|e| e.id == id_save) {
+                        e.label = label_row.text().to_string();
+                        e.number = number_row.text().to_string();
+                        row.set_title(&e.display_label());
+                        row.set_subtitle(&e.number);
+                        crate::quickdial::save(&entries);
+                    }
+                }
+            ));
+
+            row
+        }
+
+        fn add_new_quickdial(&self) {
+            let entry = crate::quickdial::QuickDial::new();
+            let mut entries = crate::quickdial::load();
+            entries.push(entry.clone());
+            crate::quickdial::save(&entries);
+
+            let row = self.make_quickdial_row(&entry);
+            if let Some(group) = self.quickdials_group.borrow().as_ref() {
+                group.add(&row);
+            }
+            row.set_expanded(true);
+        }
+
         pub fn build_audio_ui(&self) {
             let devices = crate::ringer::enumerate_output_devices();
             // Use UFCS to avoid ambiguity with gtk4::prelude::AppInfoExt::display_name.
@@ -397,6 +515,7 @@ impl SettingsDialog {
             }
         }
         obj.imp().build_accounts_ui();
+        obj.imp().build_quickdials_ui();
         obj.imp().build_audio_ui();
         obj
     }

@@ -39,6 +39,7 @@ window.rs          — MainWindow: top-level UI orchestration, manages Vec<Activ
 ├── ringer.rs      — Ringer: GStreamer tone-generator for incoming/ringback tones
 ├── call_log.rs    — CallLog: persistent call history (newest-first, max 500 records)
 ├── accounts.rs    — Account config: load/save JSON, migrate from GSettings
+├── quickdial.rs   — QuickDial config: label+number speed-dial entries (JSON)
 ├── keyring.rs     — libsecret wrapper for SIP password storage
 └── widgets/       — Composite GTK4 widgets (CallScreen, Dialpad, SettingsDialog)
 ```
@@ -85,6 +86,13 @@ window.rs          — MainWindow: top-level UI orchestration, manages Vec<Activ
 - `CallLog` persists call records to `~/.local/share/tmwphone/calls.log` (pipe-delimited: `timestamp|direction|status|number|duration_secs`). Newest-first; capped at 500 entries.
 - `CallLog::push()` inserts at index 0 and immediately rewrites the file.
 - Display helpers: `display_name(raw)` extracts a human-readable label from a raw From-URI or dialled number; `callable(raw)` extracts the dialable address for call-back; `format_time` and `format_duration` format timestamps and durations for the UI.
+
+### Quickdial (`src/quickdial.rs`)
+
+- `QuickDial` struct: `id` (via `accounts::new_id()`), `label`, `number`. Persisted as JSON at `~/.local/share/tmwphone/quickdials.json` via `load()` / `save()` (mirrors `accounts.rs`).
+- `display_label()` returns the label, falling back to the number, then `"Quickdial"`.
+- `window.rs` renders an always-visible quickdial bar (a horizontally-scrolling `GtkBox` of pill buttons) above the view-stack tabs (`refresh_quickdials()`). Each button dials immediately via `start_call(number, "")`; the bar is hidden when no entries are configured. The bar is rebuilt on startup and whenever the settings dialog closes.
+- `SettingsDialog` has a "Quickdial" preferences page (`build_quickdials_ui` / `make_quickdial_row`) with per-entry add/edit/delete, following the accounts-page pattern (reload list → mutate by `id` → save).
 
 ### Keyring (`src/keyring.rs`)
 
