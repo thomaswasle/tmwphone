@@ -56,28 +56,49 @@
                       </object>
                     </child>
 
-                    <!-- Always-visible quickdial bar (above the tabs) -->
                     <child>
-                      <object class="GtkScrolledWindow" id="quickdial_scroll">
-                        <property name="visible">false</property>
-                        <property name="hscrollbar-policy">automatic</property>
-                        <property name="vscrollbar-policy">never</property>
-                        <property name="propagate-natural-height">true</property>
+                      <object class="GtkBox">
+                        <property name="orientation">horizontal</property>
+                        <property name="hexpand">true</property>
+                        <property name="vexpand">true</property>
+
+                        <!-- Always-visible quickdial sidebar (left edge) -->
                         <child>
-                          <object class="GtkBox" id="quickdial_bar">
-                            <property name="spacing">6</property>
-                            <property name="margin-top">8</property>
-                            <property name="margin-bottom">8</property>
-                            <property name="margin-start">12</property>
-                            <property name="margin-end">12</property>
+                          <object class="GtkScrolledWindow" id="quickdial_scroll">
+                            <property name="visible">false</property>
+                            <property name="width-request">132</property>
+                            <property name="hscrollbar-policy">never</property>
+                            <property name="vscrollbar-policy">automatic</property>
+                            <property name="propagate-natural-width">true</property>
+                            <style>
+                              <class name="quickdial-sidebar"/>
+                            </style>
+                            <child>
+                              <object class="GtkBox" id="quickdial_bar">
+                                <property name="orientation">vertical</property>
+                                <property name="spacing">6</property>
+                                <property name="margin-top">12</property>
+                                <property name="margin-bottom">12</property>
+                                <property name="margin-start">8</property>
+                                <property name="margin-end">8</property>
+                              </object>
+                            </child>
                           </object>
                         </child>
-                      </object>
-                    </child>
 
-                    <child>
-                      <object class="AdwViewStack" id="view_stack">
-                        <property name="vexpand">true</property>
+                        <child>
+                          <object class="GtkSeparator" id="quickdial_separator">
+                            <property name="visible">false</property>
+                            <property name="orientation">vertical</property>
+                          </object>
+                        </child>
+
+                        <child>
+                          <object class="AdwViewStack" id="view_stack">
+                            <property name="hexpand">true</property>
+                            <property name="vexpand">true</property>
+                          </object>
+                        </child>
                       </object>
                     </child>
                   </object>

@@ -51,6 +51,8 @@ mod imp {
         pub quickdial_scroll: TemplateChild<gtk4::ScrolledWindow>,
         #[template_child]
         pub quickdial_bar: TemplateChild<gtk4::Box>,
+        #[template_child]
+        pub quickdial_separator: TemplateChild<gtk4::Separator>,
 
         /// account_id for each entry in `account_selector` (parallel to its model).
         pub selector_account_ids: RefCell<Vec<String>>,
@@ -664,10 +666,11 @@ mod imp {
             self.suppress_account_save.set(false);
         }
 
-        /// Rebuild the always-visible quickdial bar from the saved entries.
-        /// Each button dials its number immediately. The bar is hidden when no
-        /// quickdials are configured. Called on startup and after the settings
-        /// dialog (where quickdials are edited) closes.
+        /// Rebuild the always-visible quickdial sidebar from the saved entries.
+        /// Each button dials its number immediately. The sidebar (and its
+        /// separator) is hidden when no quickdials are configured. Called on
+        /// startup and after the settings dialog (where quickdials are edited)
+        /// closes.
         pub fn refresh_quickdials(&self) {
             let bar = self.quickdial_bar.get();
             while let Some(child) = bar.first_child() {
@@ -681,7 +684,11 @@ mod imp {
                 }
                 let button = gtk4::Button::with_label(&entry.display_label());
                 button.set_tooltip_text(Some(&entry.number));
-                button.add_css_class("pill");
+                button.set_hexpand(true);
+                // Ellipsize long labels rather than widening the sidebar.
+                if let Some(label) = button.child().and_downcast::<gtk4::Label>() {
+                    label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+                }
                 let number = entry.number.clone();
                 let weak = self.obj().downgrade();
                 button.connect_clicked(move |_| {
@@ -692,7 +699,9 @@ mod imp {
                 bar.append(&button);
             }
 
-            self.quickdial_scroll.set_visible(bar.first_child().is_some());
+            let has_entries = bar.first_child().is_some();
+            self.quickdial_scroll.set_visible(has_entries);
+            self.quickdial_separator.set_visible(has_entries);
         }
 
         /// The account_id currently chosen in the header-bar selector, if any.
