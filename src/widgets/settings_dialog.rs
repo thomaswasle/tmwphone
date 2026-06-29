@@ -336,10 +336,16 @@ mod imp {
         }
 
         pub fn build_quickdials_ui(&self) {
+            // Reorder rebuilds the whole group, so drop any existing one first.
+            if let Some(old) = self.quickdials_group.borrow_mut().take() {
+                self.quickdials_page.remove(&old);
+            }
+
             let group = adw::PreferencesGroup::new();
             group.set_title("Quickdial Keys");
             group.set_description(Some(
-                "Always-visible buttons that dial a number with one tap.",
+                "Always-visible buttons that dial a number with one tap. Use the \
+                 arrows to reorder them.",
             ));
 
             let add_btn = gtk4::Button::from_icon_name("list-add-symbolic");
@@ -372,11 +378,39 @@ mod imp {
             row.set_title(&entry.display_label());
             row.set_subtitle(&entry.number);
 
+            let obj = self.obj();
+
+            let up_btn = gtk4::Button::from_icon_name("go-up-symbolic");
+            up_btn.add_css_class("flat");
+            up_btn.set_valign(gtk4::Align::Center);
+            up_btn.set_tooltip_text(Some("Move up"));
+            row.add_suffix(&up_btn);
+
+            let down_btn = gtk4::Button::from_icon_name("go-down-symbolic");
+            down_btn.add_css_class("flat");
+            down_btn.set_valign(gtk4::Align::Center);
+            down_btn.set_tooltip_text(Some("Move down"));
+            row.add_suffix(&down_btn);
+
             let del_btn = gtk4::Button::from_icon_name("user-trash-symbolic");
             del_btn.add_css_class("flat");
             del_btn.set_valign(gtk4::Align::Center);
             del_btn.set_tooltip_text(Some("Delete quickdial"));
             row.add_suffix(&del_btn);
+
+            let id_up = id.clone();
+            up_btn.connect_clicked(glib::clone!(
+                #[weak]
+                obj,
+                move |_| obj.imp().reorder_quickdial(&id_up, true)
+            ));
+
+            let id_down = id.clone();
+            down_btn.connect_clicked(glib::clone!(
+                #[weak]
+                obj,
+                move |_| obj.imp().reorder_quickdial(&id_down, false)
+            ));
 
             let label_row = adw::EntryRow::new();
             label_row.set_title("Label");
@@ -392,8 +426,6 @@ mod imp {
             save_row.set_title("Save");
             save_row.add_css_class("suggested-action");
             row.add_row(&save_row);
-
-            let obj = self.obj();
 
             // Delete button
             let id_del = id.clone();
@@ -435,6 +467,29 @@ mod imp {
             ));
 
             row
+        }
+
+        /// Swap a quickdial with its neighbour and rebuild the list. A no-op at
+        /// the ends. The saved order is what the sidebar renders.
+        fn reorder_quickdial(&self, id: &str, up: bool) {
+            let mut entries = crate::quickdial::load();
+            let Some(pos) = entries.iter().position(|e| e.id == id) else {
+                return;
+            };
+            let target = if up {
+                if pos == 0 {
+                    return;
+                }
+                pos - 1
+            } else {
+                if pos + 1 >= entries.len() {
+                    return;
+                }
+                pos + 1
+            };
+            entries.swap(pos, target);
+            crate::quickdial::save(&entries);
+            self.build_quickdials_ui();
         }
 
         fn add_new_quickdial(&self) {
