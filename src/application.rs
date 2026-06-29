@@ -65,6 +65,9 @@ mod imp {
                 button.dialpad-call {
                     min-width: 2.5em;
                     min-height: 2.5em;
+                }
+                .quickdial-sidebar {
+                    background: @sidebar_bg_color;
                 }",
             );
             if let Some(display) = gtk4::gdk::Display::default() {

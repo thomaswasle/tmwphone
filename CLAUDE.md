@@ -91,7 +91,7 @@ window.rs          — MainWindow: top-level UI orchestration, manages Vec<Activ
 
 - `QuickDial` struct: `id` (via `accounts::new_id()`), `label`, `number`. Persisted as JSON at `~/.local/share/tmwphone/quickdials.json` via `load()` / `save()` (mirrors `accounts.rs`).
 - `display_label()` returns the label, falling back to the number, then `"Quickdial"`.
-- `window.rs` renders an always-visible quickdial bar (a horizontally-scrolling `GtkBox` of pill buttons) above the view-stack tabs (`refresh_quickdials()`). Each button dials immediately via `start_call(number, "")`; the bar is hidden when no entries are configured. The bar is rebuilt on startup and whenever the settings dialog closes.
+- `window.rs` renders an always-visible quickdial sidebar (a vertically-scrolling `GtkBox` of buttons on the left edge, beside the view stack) via `refresh_quickdials()`. Each button dials immediately via `start_call(number, "")`; the sidebar and its separator are hidden when no entries are configured. It is rebuilt on startup and whenever the settings dialog closes.
 - `SettingsDialog` has a "Quickdial" preferences page (`build_quickdials_ui` / `make_quickdial_row`) with per-entry add/edit/delete, following the accounts-page pattern (reload list → mutate by `id` → save).
 
 ### Keyring (`src/keyring.rs`)
