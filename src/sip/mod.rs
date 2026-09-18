@@ -1,4 +1,7 @@
 mod ffi;
+pub mod wsbridge;
+
+pub use wsbridge::WsConfig;
 
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::fmt;
@@ -43,6 +46,9 @@ pub struct SipEngine {
     ctx: *mut ffi::SofiaCtx,
     // Keeps the Box<HandlerBox> alive; its raw ptr is held by the C callback.
     _handler: *mut HandlerBox,
+    // Present only for the WebSocket transports.  Dropping it closes the
+    // ws:// / wss:// leg, so it must outlive the sofia context.
+    _bridge: Option<wsbridge::WsBridge>,
 }
 
 impl fmt::Debug for SipEngine {
@@ -78,10 +84,36 @@ impl SipEngine {
         transport: c_int,
         tls_verify: bool,
         tls_ca_file: &str,
+        ws: Option<WsConfig>,
         on_event: impl FnMut(SipEvent) + 'static,
     ) -> Self {
         // Double-box so we get a thin (data-only) pointer suitable for c_void.
         let handler: *mut HandlerBox = Box::into_raw(Box::new(Box::new(on_event)));
+
+        // For SIP over WebSocket, stand the bridge up first: sofia needs its
+        // loopback port as the next hop at context-creation time.
+        let mut bridge = None;
+        if let Some(cfg) = ws {
+            match wsbridge::WsBridge::start(cfg) {
+                Ok(b) => bridge = Some(b),
+                Err(e) => {
+                    log::error!("WebSocket bridge failed to start: {e}");
+                    unsafe {
+                        let cb: &mut HandlerBox = &mut *handler;
+                        cb(SipEvent::RegistrationFailed(format!(
+                            "WebSocket transport unavailable: {e}"
+                        )));
+                        drop(Box::from_raw(handler));
+                    }
+                    return SipEngine {
+                        ctx: std::ptr::null_mut(),
+                        _handler: std::ptr::null_mut(),
+                        _bridge: None,
+                    };
+                }
+            }
+        }
+        let bridge_port = bridge.as_ref().map_or(0, |b| b.port());
 
         let server_c = CString::new(server).unwrap_or_default();
         let proxy_c = CString::new(proxy).unwrap_or_default();
@@ -94,6 +126,7 @@ impl SipEngine {
                 transport,
                 tls_verify as c_int,
                 tls_ca_c.as_ptr(),
+                bridge_port as c_int,
                 sofia_event_cb,
                 handler as *mut c_void,
             )
@@ -106,10 +139,14 @@ impl SipEngine {
                 cb(SipEvent::RegistrationFailed("SIP stack failed to start".into()));
                 drop(Box::from_raw(handler));
             }
-            return SipEngine { ctx: std::ptr::null_mut(), _handler: std::ptr::null_mut() };
+            return SipEngine {
+                ctx: std::ptr::null_mut(),
+                _handler: std::ptr::null_mut(),
+                _bridge: None,
+            };
         }
 
-        SipEngine { ctx, _handler: handler }
+        SipEngine { ctx, _handler: handler, _bridge: bridge }
     }
 
     pub fn register(&self, config: SipConfig) {

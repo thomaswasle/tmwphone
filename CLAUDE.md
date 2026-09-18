@@ -34,7 +34,8 @@ Unit tests live in `#[cfg(test)]` modules inside the source files and run with `
 window.rs          — MainWindow: top-level UI orchestration, manages Vec<ActiveEngine>
 ├── sip/mod.rs     — SipEngine: Rust wrapper around the C SIP stack
 │   ├── sip/ffi.rs — unsafe extern "C" declarations
-│   └── sip/glue.c — sofia-sip NUA integration (SIP signaling, SDP, digest auth)
+│   ├── sip/glue.c — sofia-sip NUA integration (SIP signaling, SDP, digest auth)
+│   └── sip/wsbridge.rs — SIP-over-WebSocket transport (RFC 7118)
 ├── audio.rs       — AudioSession: GStreamer RTP pipelines (send + recv)
 ├── ringer.rs      — Ringer: GStreamer tone-generator for incoming/ringback tones
 ├── call_log.rs    — CallLog: persistent call history (newest-first, max 500 records)
@@ -57,6 +58,22 @@ window.rs          — MainWindow: top-level UI orchestration, manages Vec<Activ
 - An in-progress consultation leg is dropped (`drop_consult_leg`, BYE if established else CANCEL) whenever the primary call goes away so it cannot orphan — on explicit local hangup (`sofia_hangup`) and when the primary's own dialog ends (`nua_i_bye`/`nua_i_error` primary branch). The one exception is an attended transfer in flight: `sofia_complete_transfer` sets `transfer_in_progress`, which suppresses the self-BYE because the Replaces in the REFER atomically terminates the consult leg — a parallel BYE would race it. The flag is cleared when the transfer concludes (NOTIFY sipfrag, or REFER failure) and defensively reset at every call/consult entry point (`sofia_call`, `sofia_answer`, `sofia_start_consultation`).
 - **`mod.rs`** converts C events into `SipEvent` enum values and invokes a closure directly on the GTK main thread (sofia NUA callbacks arrive on the main thread via the GLib event loop).
 
+### WebSocket transport (`src/sip/wsbridge.rs`)
+
+- sofia-sip 1.12.11 (the Debian/Ubuntu package this project links against) has **no WebSocket tport** — only UDP, TCP and TLS. SIP over WebSocket is therefore terminated in Rust and handed to sofia as plain loopback TCP:
+  `sofia (TCP) → 127.0.0.1:<bridge port> → [WsBridge] → ws(s)://host/path`
+- `WsBridge::start()` binds a loopback listener and returns its port; `SipEngine::new()` starts it **before** `sofia_ctx_create()`, because sofia needs that port as its next hop at context-creation time. The bridge is owned by the `SipEngine`, so dropping the engine closes the WebSocket leg.
+- The bridge is sofia's **outbound proxy**: `glue.c` sets `NUTAG_PROXY` to `sip:127.0.0.1:<bridge port>;transport=tcp;lr`, so every request carries a `Route` naming the bridge. Acting as a loose-routing next hop, the bridge **strips that `Route`** — what a real proxy does with a route pointing at itself.
+- Header rewriting, applied **to the header block only** (the SDP body carries the real LAN media address and must never be touched):
+  - outbound: `SIP/2.0/TCP` → `SIP/2.0/WS`, `127.0.0.1:<port>` → `<token>.invalid`, `;transport=tcp` → `;transport=ws`
+  - inbound: the exact inverse, mapping `<token>.invalid` back to the `sent-by` learned from the first outbound `Via`
+- `<token>.invalid` is what RFC 7118 §5 requires of a WebSocket client: an unroutable Contact, so the server must return in-dialog requests over the established connection instead of opening a new one.
+- RFC 6455 framing is implemented directly (`encode_frame` / `decode_frame`): client frames are masked with `/dev/urandom` key material, ping is answered with pong, and fragmented messages are reassembled. TLS for `wss://` is `gio::SocketClient::set_tls` — `tls_verify` and `tls_ca_file` mean the same thing they do for the sofia TLS transport.
+- SIP messages are split off the TCP stream by `Content-Length` (`take_sip_message`), since a stream transport is not message-framed; leading CRLF keep-alives are discarded.
+- All I/O is `gio` async on the GLib main loop, so the bridge obeys the same single-threaded rule as the rest of the SIP layer.
+- In `glue.c`, `ctx->sip_bind_ip` (127.0.0.1 for WS/WSS) is deliberately **separate** from `ctx->local_ip`: the latter is also the SDP media address and must stay the real LAN address. WS accounts also build the registrar URI as a bare `sip:<server>` — the account's port is the HTTP port (80/443) and has no meaning in a SIP request-URI.
+- Tested by 21 unit tests plus an end-to-end test (`mod e2e`) that runs a real `WsBridge` against a minimal in-process WebSocket server; the framing is additionally checked against the RFC 6455 §1.3/§5.7 test vectors.
+
 ### Audio layer (`src/audio.rs`)
 
 - `AudioSession::start()` builds two independent GStreamer pipelines: receive and send.
@@ -74,8 +91,8 @@ window.rs          — MainWindow: top-level UI orchestration, manages Vec<Activ
 
 ### Accounts (`src/accounts.rs`)
 
-- `Account` struct fields: `id` (hex timestamp + counter), `display_name`, `username`, `server`, `port` (u16, default 5060), `proxy` (outbound proxy host, empty = none), `transport` (`Transport` enum: `Udp` / `Tcp` / `Tls`, default `Udp`), `tls_verify` (bool), `tls_ca_file` (path to PEM CA, used when `tls_verify` is true and `transport == Tls`), `register_on_startup`.
-- `Transport::default_port()` returns 5061 for TLS, 5060 otherwise. `Transport::as_c_int()` maps to the `TRANSPORT_*` constants in `glue.h`.
+- `Account` struct fields: `id` (hex timestamp + counter), `display_name`, `username`, `server`, `port` (u16, default 5060), `proxy` (outbound proxy host, empty = none), `transport` (`Transport` enum: `Udp` / `Tcp` / `Tls` / `Ws` / `Wss`, default `Udp`), `tls_verify` (bool), `tls_ca_file` (path to PEM CA, used when `tls_verify` is true and the transport is `Tls` or `Wss`), `ws_path` (WebSocket endpoint path, empty = `/ws`), `register_on_startup`.
+- `Transport::default_port()` returns 5061 for TLS, 80 for WS, 443 for WSS, 5060 otherwise. `Transport::as_c_int()` maps to the `TRANSPORT_*` constants in `glue.h`. `Transport::is_websocket()` selects the transports served by the bridge rather than natively by sofia.
 - Persisted as JSON at `~/.local/share/tmwphone/accounts.json`. `load()` / `save()` are the only public API besides `Account::new()` and `Account::label()`.
 - `load()` includes a migration path for old entries where `port` was embedded in `server` as `"host:port"` — it splits them on the first load.
 - On first run (no accounts.json), `migrate_from_gsettings()` reads `sip-username`, `sip-server`, `sip-display-name`, `sip-port` from GSettings, builds a single `Account`, saves it, and returns it. The GSettings SIP keys are kept only for this one-time migration.

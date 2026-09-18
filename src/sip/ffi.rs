@@ -35,6 +35,7 @@ extern "C" {
         transport: c_int,
         tls_verify: c_int,
         tls_ca_file: *const c_char,
+        bridge_port: c_int,
         cb: SofiaEventCb,
         userdata: *mut c_void,
     ) -> *mut SofiaCtx;

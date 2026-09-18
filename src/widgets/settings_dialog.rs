@@ -5,6 +5,22 @@ use adw::subclass::prelude::*;
 use std::cell::RefCell;
 use std::collections::HashSet;
 
+/// Map the transport `ComboRow`'s selection index to a [`Transport`].
+///
+/// The order must match the `StringList` the row is populated with.
+///
+/// [`Transport`]: crate::accounts::Transport
+fn transport_from_index(index: u32) -> crate::accounts::Transport {
+    use crate::accounts::Transport;
+    match index {
+        1 => Transport::Tcp,
+        2 => Transport::Tls,
+        3 => Transport::Ws,
+        4 => Transport::Wss,
+        _ => Transport::Udp,
+    }
+}
+
 mod imp {
     use super::*;
     use std::sync::OnceLock;
@@ -151,14 +167,31 @@ mod imp {
 
             let transport_row = adw::ComboRow::new();
             transport_row.set_title("Transport");
-            transport_row.set_model(Some(&gtk4::StringList::new(&["UDP", "TCP", "TLS"])));
-            let is_tls = account.transport == crate::accounts::Transport::Tls;
+            transport_row
+                .set_model(Some(&gtk4::StringList::new(&["UDP", "TCP", "TLS", "WS", "WSS"])));
             transport_row.set_selected(match account.transport {
                 crate::accounts::Transport::Udp => 0,
                 crate::accounts::Transport::Tcp => 1,
                 crate::accounts::Transport::Tls => 2,
+                crate::accounts::Transport::Ws => 3,
+                crate::accounts::Transport::Wss => 4,
             });
             row.add_row(&transport_row);
+
+            // The TLS rows apply to WSS as well: the WebSocket bridge honours
+            // the same verification flag and CA override as the sofia TLS
+            // transport does.
+            let is_tls = matches!(
+                account.transport,
+                crate::accounts::Transport::Tls | crate::accounts::Transport::Wss
+            );
+            let is_ws = account.transport.is_websocket();
+
+            let ws_path_row = adw::EntryRow::new();
+            ws_path_row.set_title("WebSocket path");
+            ws_path_row.set_text(account.ws_path_or_default());
+            ws_path_row.set_visible(is_ws);
+            row.add_row(&ws_path_row);
 
             let tls_verify_row = adw::SwitchRow::new();
             tls_verify_row.set_title("Verify TLS certificate");
@@ -183,10 +216,28 @@ mod imp {
                 glib::clone!(
                     #[weak] tls_verify_row,
                     #[weak] tls_ca_row,
-                    move |combo, _| {
-                        let visible = combo.selected() == 2;
-                        tls_verify_row.set_visible(visible);
-                        tls_ca_row.set_visible(visible);
+                    #[weak] ws_path_row,
+                    #[weak] port_row,
+                    move |combo: &adw::ComboRow, _| {
+                        let selected = combo.selected();
+                        let transport = transport_from_index(selected);
+                        // TLS options apply to TLS (2) and WSS (4).
+                        let tls_visible = selected == 2 || selected == 4;
+                        tls_verify_row.set_visible(tls_visible);
+                        tls_ca_row.set_visible(tls_visible);
+                        ws_path_row.set_visible(transport.is_websocket());
+
+                        // The sensible port differs per family (5060 / 5061 /
+                        // 80 / 443), so follow the transport as long as the
+                        // field still holds another transport's default — never
+                        // overwrite a port the user actually chose.
+                        let current = port_row.text().to_string();
+                        let is_a_default = current.parse::<u16>().ok().is_some_and(|p| {
+                            [5060u16, 5061, 80, 443].contains(&p)
+                        });
+                        if current.is_empty() || is_a_default {
+                            port_row.set_text(&transport.default_port().to_string());
+                        }
                     }
                 ),
             );
@@ -300,6 +351,8 @@ mod imp {
                 #[weak]
                 tls_ca_row,
                 #[weak]
+                ws_path_row,
+                #[weak]
                 startup_row,
                 #[weak]
                 row,
@@ -309,15 +362,16 @@ mod imp {
                         acc.display_name = dn_row.text().to_string();
                         acc.username = user_row.text().to_string();
                         acc.server = srv_row.text().to_string();
-                        acc.port = port_row.text().to_string().parse::<u16>().unwrap_or(5060);
                         acc.proxy = proxy_row.text().to_string();
-                        acc.transport = match transport_row.selected() {
-                            1 => crate::accounts::Transport::Tcp,
-                            2 => crate::accounts::Transport::Tls,
-                            _ => crate::accounts::Transport::Udp,
-                        };
+                        acc.transport = transport_from_index(transport_row.selected());
+                        acc.port = port_row
+                            .text()
+                            .to_string()
+                            .parse::<u16>()
+                            .unwrap_or_else(|_| acc.transport.default_port());
                         acc.tls_verify = tls_verify_row.is_active();
                         acc.tls_ca_file = tls_ca_row.text().to_string();
+                        acc.ws_path = ws_path_row.text().to_string();
                         acc.register_on_startup = startup_row.is_active();
                         row.set_title(&acc.label());
                         row.set_subtitle(&format!("{}:{}", acc.server, acc.port));

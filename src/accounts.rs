@@ -9,14 +9,28 @@ pub enum Transport {
     Udp,
     Tcp,
     Tls,
+    /// SIP over WebSocket (RFC 7118), plaintext.
+    Ws,
+    /// SIP over secure WebSocket (RFC 7118), TLS.
+    Wss,
 }
 
 impl Transport {
     pub fn default_port(self) -> u16 {
         match self {
             Transport::Tls => 5061,
+            // WebSocket transports are HTTP-based, so they default to the web
+            // ports rather than the SIP ones.
+            Transport::Ws => 80,
+            Transport::Wss => 443,
             _ => 5060,
         }
+    }
+
+    /// True for the transports served by the in-process WebSocket bridge
+    /// (`src/sip/wsbridge.rs`) rather than natively by sofia-sip.
+    pub fn is_websocket(self) -> bool {
+        matches!(self, Transport::Ws | Transport::Wss)
     }
 
     pub fn as_c_int(self) -> std::ffi::c_int {
@@ -24,6 +38,8 @@ impl Transport {
             Transport::Udp => 0,
             Transport::Tcp => 1,
             Transport::Tls => 2,
+            Transport::Ws => 3,
+            Transport::Wss => 4,
         }
     }
 }
@@ -44,12 +60,20 @@ pub struct Account {
     pub tls_verify: bool,
     #[serde(default)]
     pub tls_ca_file: String,
+    /// HTTP resource path of the WebSocket endpoint, used only by the `Ws` /
+    /// `Wss` transports.  Empty falls back to [`DEFAULT_WS_PATH`].
+    #[serde(default)]
+    pub ws_path: String,
     pub register_on_startup: bool,
 }
 
 fn default_port() -> u16 {
     5060
 }
+
+/// Endpoint path used when an account leaves `ws_path` empty.  Both Asterisk
+/// (`res_http_websocket`) and Kamailio serve SIP-over-WS at `/ws` by default.
+pub const DEFAULT_WS_PATH: &str = "/ws";
 
 impl Account {
     pub fn new() -> Self {
@@ -67,6 +91,18 @@ impl Account {
             self.username.clone()
         } else {
             "New account".to_string()
+        }
+    }
+
+    /// WebSocket endpoint path, falling back to [`DEFAULT_WS_PATH`] when the
+    /// account leaves it blank (including accounts saved before `ws_path`
+    /// existed, which deserialize to an empty string).
+    pub fn ws_path_or_default(&self) -> &str {
+        let path = self.ws_path.trim();
+        if path.is_empty() {
+            DEFAULT_WS_PATH
+        } else {
+            path
         }
     }
 }
@@ -138,6 +174,7 @@ fn migrate_from_gsettings() -> Vec<Account> {
         transport: Transport::Udp,
         tls_verify: false,
         tls_ca_file: String::new(),
+        ws_path: String::new(),
         register_on_startup: true,
     };
     let accounts = vec![account];

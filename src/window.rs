@@ -522,6 +522,16 @@ mod imp {
 
             let account_id = account.id.clone();
             let obj_weak = self.obj().downgrade();
+            // WebSocket accounts need bridge configuration; the native
+            // transports pass None and sofia handles the socket itself.
+            let ws = account.transport.is_websocket().then(|| crate::sip::WsConfig {
+                host: account.server.clone(),
+                port: account.port,
+                path: account.ws_path_or_default().to_string(),
+                secure: account.transport == crate::accounts::Transport::Wss,
+                tls_verify: account.tls_verify,
+                tls_ca_file: account.tls_ca_file.clone(),
+            });
             let engine = SipEngine::new(
                 &account.server,
                 account.port,
@@ -529,6 +539,7 @@ mod imp {
                 account.transport.as_c_int(),
                 account.tls_verify,
                 &account.tls_ca_file,
+                ws,
                 move |event| {
                     if let Some(obj) = obj_weak.upgrade() {
                         obj.imp().handle_sip_event(account_id.clone(), event);

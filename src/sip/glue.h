@@ -31,6 +31,11 @@ typedef struct SofiaCtx SofiaCtx;
 #define TRANSPORT_UDP 0
 #define TRANSPORT_TCP 1
 #define TRANSPORT_TLS 2
+/* SIP over WebSocket (RFC 7118).  sofia-sip 1.12 has no WebSocket tport, so
+   these are carried over a loopback TCP connection to the in-process bridge in
+   src/sip/wsbridge.rs, which owns the real ws:// / wss:// socket. */
+#define TRANSPORT_WS  3
+#define TRANSPORT_WSS 4
 
 /* Create context integrated with the current GLib main context.
    server/port  — used to pick the correct local interface on multi-homed hosts.
@@ -38,10 +43,16 @@ typedef struct SofiaCtx SofiaCtx;
    transport    — one of TRANSPORT_UDP / TRANSPORT_TCP / TRANSPORT_TLS.
    tls_verify   — non-zero: verify server certificate; zero: skip verification.
    tls_ca_file  — path to a PEM CA certificate for verification (NULL or empty
-                  = use system CA store when tls_verify is set).
+                  = use system CA store when tls_verify is set).  Ignored for
+                  the WebSocket transports, where the bridge terminates TLS.
+   bridge_port  — loopback port of the WebSocket bridge; required for
+                  TRANSPORT_WS / TRANSPORT_WSS, ignored otherwise.  It replaces
+                  `proxy` as the next hop, since the bridge is the only
+                  reachable route to the server.
    Must be called from the GTK main thread. */
 SofiaCtx *sofia_ctx_create(const char *server, int port, const char *proxy,
                             int transport, int tls_verify, const char *tls_ca_file,
+                            int bridge_port,
                             sofia_event_cb_t cb, void *userdata);
 
 /* Destroy context.  No callbacks will fire after this returns. */

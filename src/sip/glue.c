@@ -38,6 +38,12 @@ struct SofiaCtx {
     char             *auth_str;
     char             *call_to;    /* To URI of the current outgoing call */
     char              local_ip[INET_ADDRSTRLEN];
+    /* Address the SIP transport binds to and advertises.  Identical to
+       local_ip for the native transports, but 127.0.0.1 for WS/WSS, where the
+       next hop is the loopback bridge.  It must stay separate from local_ip:
+       local_ip is also the media address written into the SDP, and that has to
+       remain the real LAN address or audio would be sent to loopback. */
+    char              sip_bind_ip[INET_ADDRSTRLEN];
     int               local_sip_port; /* bound SIP transport port — must appear in Contact */
 
     int               local_rtp_port;
@@ -106,7 +112,14 @@ struct SofiaCtx {
 /* ── Transport helpers ────────────────────────────────────────────────────── */
 
 static const char *sip_scheme(const SofiaCtx *ctx) {
+    /* RFC 7118 §4: SIP over WebSocket keeps the "sip" scheme even for wss —
+       the security of the leg is expressed by ";transport=wss", not by "sips". */
     return ctx->transport == TRANSPORT_TLS ? "sips" : "sip";
+}
+
+/* True for the transports handled by the loopback WebSocket bridge. */
+static int is_ws(const SofiaCtx *ctx) {
+    return ctx->transport == TRANSPORT_WS || ctx->transport == TRANSPORT_WSS;
 }
 
 /* Build a SIP target URI from a dialled string into `buf`:
@@ -127,9 +140,12 @@ static void build_target_uri(const SofiaCtx *ctx, const char *number,
         snprintf(buf, buflen, "%s:%s@%s", sip_scheme(ctx), number, ctx->server);
 }
 
-/* Returns ";transport=tcp" for TCP, "" for UDP and TLS (TLS uses sips: scheme). */
+/* Returns ";transport=tcp" for TCP and for WS/WSS, "" for UDP and TLS (TLS
+   uses the sips: scheme instead).  The WebSocket transports deliberately emit
+   the TCP token: on the wire to sofia this leg really is TCP, and the bridge
+   rewrites ";transport=tcp" to ";transport=ws" on the way out. */
 static const char *transport_param(const SofiaCtx *ctx) {
-    return ctx->transport == TRANSPORT_TCP ? ";transport=tcp" : "";
+    return (ctx->transport == TRANSPORT_TCP || is_ws(ctx)) ? ";transport=tcp" : "";
 }
 
 /* Build the Contact header for INVITE/re-INVITE.  Sofia 1.13 omits an
@@ -141,12 +157,16 @@ static void build_contact(const SofiaCtx *ctx, char *buf, size_t len) {
        and an omitted port defaults to 5060 — which we do NOT listen on, so the
        BYE would be lost and the call would never end locally. */
     int port = ctx->local_sip_port;
+    const char *host = ctx->sip_bind_ip[0] ? ctx->sip_bind_ip : ctx->local_ip;
     if (ctx->transport == TRANSPORT_TLS)
-        snprintf(buf, len, "<sips:%s@%s:%d>", ctx->user, ctx->local_ip, port);
-    else if (ctx->transport == TRANSPORT_TCP)
-        snprintf(buf, len, "<sip:%s@%s:%d;transport=tcp>", ctx->user, ctx->local_ip, port);
+        snprintf(buf, len, "<sips:%s@%s:%d>", ctx->user, host, port);
+    else if (ctx->transport == TRANSPORT_TCP || is_ws(ctx))
+        /* For WS/WSS this yields "<sip:user@127.0.0.1:PORT;transport=tcp>",
+           which the bridge rewrites to "<sip:user@<token>.invalid;transport=ws>"
+           — the unroutable Contact RFC 7118 §5 mandates for a WebSocket client. */
+        snprintf(buf, len, "<sip:%s@%s:%d;transport=tcp>", ctx->user, host, port);
     else
-        snprintf(buf, len, "<sip:%s@%s:%d>", ctx->user, ctx->local_ip, port);
+        snprintf(buf, len, "<sip:%s@%s:%d>", ctx->user, host, port);
 }
 
 /* ── Local-interface selection ────────────────────────────────────────────── */
@@ -1028,6 +1048,7 @@ static void nua_cb(nua_event_t event, int status, char const *phrase,
 
 SofiaCtx *sofia_ctx_create(const char *server, int port, const char *proxy,
                            int transport, int tls_verify, const char *tls_ca_file,
+                           int bridge_port,
                            sofia_event_cb_t cb, void *userdata) {
     su_init();
 
@@ -1045,6 +1066,15 @@ SofiaCtx *sofia_ctx_create(const char *server, int port, const char *proxy,
     if (server && *server)
         get_local_ip_for(server, port, ctx->local_ip, sizeof(ctx->local_ip));
 
+    /* The WebSocket transports talk to the bridge over loopback, so the SIP
+       transport must bind to 127.0.0.1 — sofia reuses its bound address as the
+       source of outgoing connections, and a LAN source address cannot reach a
+       loopback destination.  local_ip keeps the LAN address for the SDP. */
+    if (is_ws(ctx))
+        strncpy(ctx->sip_bind_ip, "127.0.0.1", sizeof(ctx->sip_bind_ip) - 1);
+    else
+        strncpy(ctx->sip_bind_ip, ctx->local_ip, sizeof(ctx->sip_bind_ip) - 1);
+
     char nua_url[128];
     /* Pick the local SIP port once and remember it: build_contact must advertise
        this exact port so peer-originated in-dialog requests (e.g. BYE) reach us. */
@@ -1052,11 +1082,11 @@ SofiaCtx *sofia_ctx_create(const char *server, int port, const char *proxy,
         ? get_free_udp_port()
         : get_free_tcp_port();
     if (transport == TRANSPORT_TLS)
-        snprintf(nua_url, sizeof(nua_url), "sips:%s:%d", ctx->local_ip, ctx->local_sip_port);
-    else if (transport == TRANSPORT_TCP)
-        snprintf(nua_url, sizeof(nua_url), "sip:%s:%d;transport=tcp", ctx->local_ip, ctx->local_sip_port);
+        snprintf(nua_url, sizeof(nua_url), "sips:%s:%d", ctx->sip_bind_ip, ctx->local_sip_port);
+    else if (transport == TRANSPORT_TCP || is_ws(ctx))
+        snprintf(nua_url, sizeof(nua_url), "sip:%s:%d;transport=tcp", ctx->sip_bind_ip, ctx->local_sip_port);
     else
-        snprintf(nua_url, sizeof(nua_url), "sip:%s:%d", ctx->local_ip, ctx->local_sip_port);
+        snprintf(nua_url, sizeof(nua_url), "sip:%s:%d", ctx->sip_bind_ip, ctx->local_sip_port);
 
     ctx->root = su_glib_root_create(NULL);
     if (!ctx->root) {
@@ -1166,7 +1196,15 @@ SofiaCtx *sofia_ctx_create(const char *server, int port, const char *proxy,
        registrar rejects ("syntax error on Request Line"). */
     {
         char proxy_uri[600];
-        if (proxy && *proxy) {
+        if (is_ws(ctx)) {
+            /* The bridge owns the only socket that reaches the server, so it is
+               always the next hop.  A user-configured outbound proxy is not
+               dropped — it is simply not expressible here; the bridge connects
+               to whatever host the account names, and the server-side routing
+               beyond that is the WebSocket endpoint's business. */
+            snprintf(proxy_uri, sizeof(proxy_uri),
+                     "sip:127.0.0.1:%d;transport=tcp", bridge_port);
+        } else if (proxy && *proxy) {
             /* User-configured outbound proxy. */
             if (strncmp(proxy, "sip:", 4) == 0 || strncmp(proxy, "sips:", 5) == 0)
                 snprintf(proxy_uri, sizeof(proxy_uri), "%s", proxy);
@@ -1266,8 +1304,17 @@ void sofia_register(SofiaCtx   *ctx,
     build_auth(ctx, server);
 
     char registrar[512], from[512];
-    snprintf(registrar, sizeof(registrar), "%s:%s:%d%s",
-             sip_scheme(ctx), server, port, transport_param(ctx));
+    if (is_ws(ctx))
+        /* The account's port is the HTTP port of the WebSocket endpoint
+           (80/443), which is meaningless in a SIP request-URI — and no
+           transport parameter is needed either, because the next hop is
+           already pinned by the Route header naming the bridge.  Emitting
+           either would make the registrar URI disagree with the AOR the server
+           knows. */
+        snprintf(registrar, sizeof(registrar), "sip:%s", server);
+    else
+        snprintf(registrar, sizeof(registrar), "%s:%s:%d%s",
+                 sip_scheme(ctx), server, port, transport_param(ctx));
     snprintf(from, sizeof(from),
              "\"%s\" <%s:%s@%s>", display_name, sip_scheme(ctx), user, server);
 
