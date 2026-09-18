@@ -193,6 +193,12 @@ mod imp {
             ws_path_row.set_visible(is_ws);
             row.add_row(&ws_path_row);
 
+            let webrtc_row = adw::SwitchRow::new();
+            webrtc_row.set_title("WebRTC media");
+            webrtc_row.set_subtitle("Encrypted media (DTLS-SRTP) with ICE, as browsers use");
+            webrtc_row.set_active(account.webrtc);
+            row.add_row(&webrtc_row);
+
             let tls_verify_row = adw::SwitchRow::new();
             tls_verify_row.set_title("Verify TLS certificate");
             tls_verify_row.set_active(account.tls_verify);
@@ -353,6 +359,8 @@ mod imp {
                 #[weak]
                 ws_path_row,
                 #[weak]
+                webrtc_row,
+                #[weak]
                 startup_row,
                 #[weak]
                 row,
@@ -372,6 +380,7 @@ mod imp {
                         acc.tls_verify = tls_verify_row.is_active();
                         acc.tls_ca_file = tls_ca_row.text().to_string();
                         acc.ws_path = ws_path_row.text().to_string();
+                        acc.webrtc = webrtc_row.is_active();
                         acc.register_on_startup = startup_row.is_active();
                         row.set_title(&acc.label());
                         row.set_subtitle(&format!("{}:{}", acc.server, acc.port));

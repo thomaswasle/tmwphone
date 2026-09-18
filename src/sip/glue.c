@@ -59,6 +59,15 @@ struct SofiaCtx {
     unsigned int      sdp_sess_id;
     unsigned int      sdp_version;
 
+    /* WebRTC mode: the media layer (webrtcbin) owns the SDP, so this layer
+       neither builds nor parses it.  The local offer is retained because a
+       401/407 retry must re-send the *same* SDP — regenerating it would change
+       the ICE credentials and DTLS fingerprint mid-transaction, and the peer
+       would answer against an offer we no longer hold. */
+    gboolean          webrtc;
+    char             *local_sdp;
+    char             *consult_local_sdp;
+
     /* Declined (port-0) m-lines mirroring every non-audio stream the remote
        offered on the primary call, e.g. "m=video 0 RTP/AVP 99\r\n".  RFC 3264
        §6 requires answers — and every subsequent offer in the dialog — to keep
@@ -374,6 +383,34 @@ static void build_audio_sdp(SofiaCtx *ctx, char *buf, size_t len,
         port, direction, extra_media ? extra_media : "");
 }
 
+/* ── WebRTC SDP passthrough ───────────────────────────────────────────────── */
+
+/* Copy the SDP body of `sip` into a NUL-terminated heap buffer, or NULL when
+   the message carries none.  sip_payload is length-delimited, not terminated,
+   so it cannot be handed to the callback directly. */
+static char *dup_sdp(sip_t const *sip) {
+    if (!sip || !sip->sip_payload || !sip->sip_payload->pl_data
+        || sip->sip_payload->pl_len == 0)
+        return NULL;
+    size_t len = (size_t)sip->sip_payload->pl_len;
+    char *out = (char *)malloc(len + 1);
+    if (!out) return NULL;
+    memcpy(out, sip->sip_payload->pl_data, len);
+    out[len] = '\0';
+    return out;
+}
+
+/* Hand a remote SDP body to the Rust media layer.  No-op outside WebRTC mode
+   and when the message carries no body. */
+static void fire_remote_sdp(SofiaCtx *ctx, int event, int status,
+                            char const *phrase, sip_t const *sip) {
+    if (!ctx->webrtc) return;
+    char *sdp = dup_sdp(sip);
+    if (!sdp) return;
+    ctx->cb(event, status, phrase, sdp, ctx->userdata);
+    free(sdp);
+}
+
 /* ── Auth helpers ─────────────────────────────────────────────────────────── */
 
 /* Compute MD5(str) and write the 32-char lowercase hex result into out[33]. */
@@ -569,9 +606,16 @@ static void invite_with_digest(SofiaCtx *ctx, sip_t const *sip, int status)
 
                     free(realm_str); free(nonce_str); free(qop_str); free(opaque_str);
 
-                ctx->local_rtp_port = get_free_udp_port();
                 char sdp[512];
-                build_audio_sdp(ctx, sdp, sizeof(sdp), "sendrecv", ctx->local_rtp_port, "");
+                const char *sdp_body;
+                if (ctx->webrtc && ctx->local_sdp) {
+                    /* Re-send the original webrtcbin offer verbatim. */
+                    sdp_body = ctx->local_sdp;
+                } else {
+                    ctx->local_rtp_port = get_free_udp_port();
+                    build_audio_sdp(ctx, sdp, sizeof(sdp), "sendrecv", ctx->local_rtp_port, "");
+                    sdp_body = sdp;
+                }
 
                 /* SIPTAG_CONTACT_STR hier in beide Zweige eingefügt: */
                 if (status == 401)
@@ -579,14 +623,14 @@ static void invite_with_digest(SofiaCtx *ctx, sip_t const *sip, int status)
                                SIPTAG_CONTACT_STR(contact), // <-- Eingefügt
                                SIPTAG_AUTHORIZATION_STR(auth_hdr),
                                SIPTAG_CONTENT_TYPE_STR("application/sdp"),
-                               SIPTAG_PAYLOAD_STR(sdp),
+                               SIPTAG_PAYLOAD_STR(sdp_body),
                                TAG_END());
                     else
                         nua_invite(ctx->call_nh,
                                    SIPTAG_CONTACT_STR(contact), // <-- Eingefügt
                                    SIPTAG_PROXY_AUTHORIZATION_STR(auth_hdr),
                                    SIPTAG_CONTENT_TYPE_STR("application/sdp"),
-                                   SIPTAG_PAYLOAD_STR(sdp),
+                                   SIPTAG_PAYLOAD_STR(sdp_body),
                                    TAG_END());
 }
 
@@ -693,9 +737,15 @@ static void consult_with_digest(SofiaCtx *ctx, sip_t const *sip, int status)
 
     free(realm_str); free(nonce_str); free(qop_str); free(opaque_str);
 
-    ctx->consult_local_rtp_port = get_free_udp_port();
     char sdp[512];
-    build_audio_sdp(ctx, sdp, sizeof(sdp), "sendrecv", ctx->consult_local_rtp_port, "");
+    const char *sdp_body;
+    if (ctx->webrtc && ctx->consult_local_sdp) {
+        sdp_body = ctx->consult_local_sdp;
+    } else {
+        ctx->consult_local_rtp_port = get_free_udp_port();
+        build_audio_sdp(ctx, sdp, sizeof(sdp), "sendrecv", ctx->consult_local_rtp_port, "");
+        sdp_body = sdp;
+    }
 
     char contact[512];
     build_contact(ctx, contact, sizeof(contact));
@@ -705,14 +755,14 @@ static void consult_with_digest(SofiaCtx *ctx, sip_t const *sip, int status)
                    SIPTAG_CONTACT_STR(contact),
                    SIPTAG_AUTHORIZATION_STR(auth_hdr),
                    SIPTAG_CONTENT_TYPE_STR("application/sdp"),
-                   SIPTAG_PAYLOAD_STR(sdp),
+                   SIPTAG_PAYLOAD_STR(sdp_body),
                    TAG_END());
     else
         nua_invite(ctx->consult_nh,
                    SIPTAG_CONTACT_STR(contact),
                    SIPTAG_PROXY_AUTHORIZATION_STR(auth_hdr),
                    SIPTAG_CONTENT_TYPE_STR("application/sdp"),
-                   SIPTAG_PAYLOAD_STR(sdp),
+                   SIPTAG_PAYLOAD_STR(sdp_body),
                    TAG_END());
 }
 
@@ -812,6 +862,12 @@ static void nua_cb(nua_event_t event, int status, char const *phrase,
            codec renegotiation).  Respond with 200 OK and current SDP;
            do NOT fire SOFIA_EV_INCOMING_CALL or reset call state. */
         if (ctx->call_established && ctx->call_nh == nh) {
+            if (ctx->webrtc) {
+                /* webrtcbin must produce the answer, which it cannot do
+                   synchronously, so defer the 200 OK to sofia_respond_sdp. */
+                fire_remote_sdp(ctx, SOFIA_EV_REINVITE_SDP, status, phrase, sip);
+                break;
+            }
             extract_rtp_into(ctx, sip,
                              ctx->remote_rtp_ip, sizeof(ctx->remote_rtp_ip),
                              &ctx->remote_rtp_port, &ctx->remote_rtp_payload);
@@ -874,6 +930,9 @@ static void nua_cb(nua_event_t event, int status, char const *phrase,
 
         ctx->cb(SOFIA_EV_INCOMING_CALL, status, phrase,
                 from_buf[0] ? from_buf : "Unknown", ctx->userdata);
+        /* Deliver the caller's offer after the call is announced, so the media
+           layer has a session to apply it to. */
+        fire_remote_sdp(ctx, SOFIA_EV_REMOTE_SDP, status, phrase, sip);
         break;
     }
 
@@ -900,6 +959,10 @@ static void nua_cb(nua_event_t event, int status, char const *phrase,
                         ctx->consult_to_tag = strdup(sip->sip_to->a_tag);
 
                     ctx->cb(SOFIA_EV_CONSULT_CONNECTED, status, phrase, NULL, ctx->userdata);
+                    if (ctx->webrtc) {
+                        fire_remote_sdp(ctx, SOFIA_EV_CONSULT_REMOTE_SDP, status, phrase, sip);
+                        break;
+                    }
                     if (ctx->consult_local_rtp_port > 0 && ctx->consult_remote_port > 0) {
                         char aux[128];
                         snprintf(aux, sizeof(aux), "%d,%s,%d,%d",
@@ -930,6 +993,11 @@ static void nua_cb(nua_event_t event, int status, char const *phrase,
                                  ctx->remote_rtp_ip, sizeof(ctx->remote_rtp_ip),
                                  &ctx->remote_rtp_port, &ctx->remote_rtp_payload);
                 ctx->cb(SOFIA_EV_CALL_CONNECTED, status, phrase, NULL, ctx->userdata);
+                if (ctx->webrtc) {
+                    /* The answer drives webrtcbin; no RTP parameters to report. */
+                    fire_remote_sdp(ctx, SOFIA_EV_REMOTE_SDP, status, phrase, sip);
+                    break;
+                }
                 if (ctx->local_rtp_port > 0 && ctx->remote_rtp_port > 0) {
                     char aux[128];
                     snprintf(aux, sizeof(aux), "%d,%s,%d,%d",
@@ -1265,6 +1333,8 @@ void sofia_ctx_destroy(SofiaCtx *ctx) {
         rmdir(ctx->tls_cert_dir);
     }
 
+    free(ctx->local_sdp);
+    free(ctx->consult_local_sdp);
     free(ctx->user);
     free(ctx->password);
     free(ctx->server);
@@ -1355,7 +1425,14 @@ void sofia_reregister(SofiaCtx *ctx) {
     nua_register(ctx->reg_nh, TAG_END());
 }
 
-void sofia_call(SofiaCtx *ctx, const char *number) {
+void sofia_set_webrtc(SofiaCtx *ctx, int enabled) {
+    if (!ctx) return;
+    ctx->webrtc = enabled ? TRUE : FALSE;
+}
+
+/* Shared body of sofia_call / sofia_call_sdp.  `sdp_override` is the SDP to
+   send verbatim (WebRTC mode); NULL builds the plain-RTP offer locally. */
+static void do_invite(SofiaCtx *ctx, const char *number, const char *sdp_override) {
     if (!ctx->server || !ctx->user) return;
 
     ctx->call_auth_tried  = FALSE;
@@ -1369,7 +1446,17 @@ void sofia_call(SofiaCtx *ctx, const char *number) {
     ctx->remote_decl_media[0] = '\0';
 
     char sdp[512];
-    build_audio_sdp(ctx, sdp, sizeof(sdp), "sendrecv", ctx->local_rtp_port, "");
+    const char *sdp_body;
+    free(ctx->local_sdp);
+    ctx->local_sdp = NULL;
+    if (sdp_override) {
+        /* Retain it: a 401/407 retry must re-send this exact offer. */
+        ctx->local_sdp = strdup(sdp_override);
+        sdp_body = ctx->local_sdp;
+    } else {
+        build_audio_sdp(ctx, sdp, sizeof(sdp), "sendrecv", ctx->local_rtp_port, "");
+        sdp_body = sdp;
+    }
 
     char to[512], from[512];
     build_target_uri(ctx, number, to, sizeof(to));
@@ -1391,29 +1478,49 @@ void sofia_call(SofiaCtx *ctx, const char *number) {
     nua_invite(ctx->call_nh,
                SIPTAG_CONTACT_STR(contact),
                SIPTAG_CONTENT_TYPE_STR("application/sdp"),
-               SIPTAG_PAYLOAD_STR(sdp),
+               SIPTAG_PAYLOAD_STR(sdp_body),
                TAG_END());
 }
 
-void sofia_answer(SofiaCtx *ctx) {
+void sofia_call(SofiaCtx *ctx, const char *number) {
+    do_invite(ctx, number, NULL);
+}
+
+void sofia_call_sdp(SofiaCtx *ctx, const char *number, const char *sdp) {
+    do_invite(ctx, number, sdp);
+}
+
+/* Shared body of sofia_answer / sofia_answer_sdp. */
+static void do_answer(SofiaCtx *ctx, const char *sdp_override) {
     if (!ctx->call_nh) return;
 
     ctx->call_on_hold   = FALSE;
     ctx->transfer_in_progress = FALSE;
-    ctx->local_rtp_port = get_free_udp_port();
     char sdp[512];
-    /* Mirror the streams the caller offered, declining the non-audio ones. */
-    build_audio_sdp(ctx, sdp, sizeof(sdp), "sendrecv", ctx->local_rtp_port,
-                    ctx->remote_decl_media);
+    const char *sdp_body;
+    if (sdp_override) {
+        free(ctx->local_sdp);
+        ctx->local_sdp = strdup(sdp_override);
+        sdp_body = ctx->local_sdp;
+    } else {
+        ctx->local_rtp_port = get_free_udp_port();
+        /* Mirror the streams the caller offered, declining the non-audio ones. */
+        build_audio_sdp(ctx, sdp, sizeof(sdp), "sendrecv", ctx->local_rtp_port,
+                        ctx->remote_decl_media);
+        sdp_body = sdp;
+    }
 
     nua_respond(ctx->call_nh, SIP_200_OK,
                 SIPTAG_CONTENT_TYPE_STR("application/sdp"),
-                SIPTAG_PAYLOAD_STR(sdp),
+                SIPTAG_PAYLOAD_STR(sdp_body),
                 TAG_END());
 
     ctx->call_established = TRUE;
     ctx->call_is_incoming = FALSE;
     ctx->cb(SOFIA_EV_CALL_CONNECTED, 200, "OK", NULL, ctx->userdata);
+
+    /* WebRTC media is already negotiated by the SDP exchange itself. */
+    if (ctx->webrtc) return;
 
     if (ctx->remote_rtp_port > 0) {
         char aux[128];
@@ -1422,6 +1529,37 @@ void sofia_answer(SofiaCtx *ctx) {
                  ctx->remote_rtp_payload);
         ctx->cb(SOFIA_EV_CALL_MEDIA, 200, "OK", aux, ctx->userdata);
     }
+}
+
+void sofia_answer(SofiaCtx *ctx) {
+    do_answer(ctx, NULL);
+}
+
+void sofia_answer_sdp(SofiaCtx *ctx, const char *sdp) {
+    do_answer(ctx, sdp);
+}
+
+/* Send a re-INVITE carrying a webrtcbin-produced offer (hold/resume). */
+void sofia_reinvite_sdp(SofiaCtx *ctx, const char *sdp) {
+    if (!ctx->call_nh || !ctx->call_established || !sdp) return;
+    free(ctx->local_sdp);
+    ctx->local_sdp = strdup(sdp);
+    char contact[512];
+    build_contact(ctx, contact, sizeof(contact));
+    nua_invite(ctx->call_nh,
+               SIPTAG_CONTACT_STR(contact),
+               SIPTAG_CONTENT_TYPE_STR("application/sdp"),
+               SIPTAG_PAYLOAD_STR(ctx->local_sdp),
+               TAG_END());
+}
+
+/* Answer a remote re-INVITE that was deferred by SOFIA_EV_REINVITE_SDP. */
+void sofia_respond_sdp(SofiaCtx *ctx, const char *sdp) {
+    if (!ctx->call_nh || !sdp) return;
+    nua_respond(ctx->call_nh, SIP_200_OK,
+                SIPTAG_CONTENT_TYPE_STR("application/sdp"),
+                SIPTAG_PAYLOAD_STR(sdp),
+                TAG_END());
 }
 
 void sofia_hangup(SofiaCtx *ctx) {
@@ -1461,6 +1599,11 @@ void sofia_hangup(SofiaCtx *ctx) {
 void sofia_set_hold(SofiaCtx *ctx, int hold) {
     if (!ctx->call_nh || !ctx->call_established) return;
     ctx->call_on_hold = hold ? TRUE : FALSE;
+    /* WebRTC mode: only the flag is ours to set.  The direction change is a
+       renegotiation that webrtcbin has to drive, and it arrives later through
+       sofia_reinvite_sdp — building an offer here would emit plain-RTP SDP
+       into a DTLS-SRTP session. */
+    if (ctx->webrtc) return;
     char sdp[512];
     /* Keep the declined streams in the re-INVITE: a hold offer with fewer
        m-lines than the established session desyncs Asterisk's stream map. */
@@ -1494,7 +1637,7 @@ void sofia_blind_transfer(SofiaCtx *ctx, const char *number) {
     nua_refer(ctx->call_nh, SIPTAG_REFER_TO_STR(to), TAG_END());
 }
 
-void sofia_start_consultation(SofiaCtx *ctx, const char *number) {
+static void do_consultation(SofiaCtx *ctx, const char *number, const char *sdp_override) {
     if (!ctx->call_established) return;
     /* Put primary call on hold */
     sofia_set_hold(ctx, 1);
@@ -1505,7 +1648,16 @@ void sofia_start_consultation(SofiaCtx *ctx, const char *number) {
     ctx->consult_local_rtp_port = get_free_udp_port();
 
     char sdp[512];
-    build_audio_sdp(ctx, sdp, sizeof(sdp), "sendrecv", ctx->consult_local_rtp_port, "");
+    const char *sdp_body;
+    free(ctx->consult_local_sdp);
+    ctx->consult_local_sdp = NULL;
+    if (sdp_override) {
+        ctx->consult_local_sdp = strdup(sdp_override);
+        sdp_body = ctx->consult_local_sdp;
+    } else {
+        build_audio_sdp(ctx, sdp, sizeof(sdp), "sendrecv", ctx->consult_local_rtp_port, "");
+        sdp_body = sdp;
+    }
 
     char to[512], from[512];
     build_target_uri(ctx, number, to, sizeof(to));
@@ -1525,8 +1677,16 @@ void sofia_start_consultation(SofiaCtx *ctx, const char *number) {
     nua_invite(ctx->consult_nh,
                SIPTAG_CONTACT_STR(contact),
                SIPTAG_CONTENT_TYPE_STR("application/sdp"),
-               SIPTAG_PAYLOAD_STR(sdp),
+               SIPTAG_PAYLOAD_STR(sdp_body),
                TAG_END());
+}
+
+void sofia_start_consultation(SofiaCtx *ctx, const char *number) {
+    do_consultation(ctx, number, NULL);
+}
+
+void sofia_start_consultation_sdp(SofiaCtx *ctx, const char *number, const char *sdp) {
+    do_consultation(ctx, number, sdp);
 }
 
 void sofia_complete_transfer(SofiaCtx *ctx) {

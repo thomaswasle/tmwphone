@@ -64,6 +64,11 @@ pub struct Account {
     /// `Wss` transports.  Empty falls back to [`DEFAULT_WS_PATH`].
     #[serde(default)]
     pub ws_path: String,
+    /// Negotiate WebRTC media (DTLS-SRTP + ICE via `webrtcbin`) instead of
+    /// plain RTP. Independent of the transport: a PBX can serve SIP over WSS
+    /// with either, and tying the two would break plain-RTP WS deployments.
+    #[serde(default)]
+    pub webrtc: bool,
     pub register_on_startup: bool,
 }
 
@@ -175,6 +180,7 @@ fn migrate_from_gsettings() -> Vec<Account> {
         tls_verify: false,
         tls_ca_file: String::new(),
         ws_path: String::new(),
+        webrtc: false,
         register_on_startup: true,
     };
     let accounts = vec![account];

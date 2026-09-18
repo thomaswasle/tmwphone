@@ -24,6 +24,18 @@ pub enum SipEvent {
     ConsultConnected,
     ConsultMedia { local_rtp_port: u16, remote_ip: String, remote_rtp_port: u16, codec: u8 },
     ConsultEnded,
+
+    // ── WebRTC mode ──────────────────────────────────────────────────────
+    // In WebRTC mode the SDP is owned by `crate::webrtc`, so these carry the
+    // raw bodies instead of the parsed RTP parameters of `CallMedia`.
+    /// Remote SDP for the primary call: the answer to our offer, or the offer
+    /// of an incoming call (delivered just after `IncomingCall`).
+    RemoteSdp(String),
+    /// Remote re-INVITE offer. The 200 OK is deferred until the media layer
+    /// produces an answer and passes it to [`SipEngine::respond_sdp`].
+    ReinviteSdp(String),
+    /// Remote SDP for the consultation leg.
+    ConsultRemoteSdp(String),
 }
 
 // ── Config passed to register() ───────────────────────────────────────────────
@@ -177,6 +189,48 @@ impl SipEngine {
         unsafe { ffi::sofia_reregister(self.ctx) }
     }
 
+    /// Switch this engine to WebRTC mode, where SDP comes from `crate::webrtc`
+    /// rather than the C layer. Must be set before the first call.
+    pub fn set_webrtc(&self, enabled: bool) {
+        if self.ctx.is_null() { return; }
+        unsafe { ffi::sofia_set_webrtc(self.ctx, enabled as c_int) }
+    }
+
+    /// Place a call offering `sdp` verbatim (WebRTC mode).
+    pub fn make_call_sdp(&self, number: &str, sdp: &str) {
+        if self.ctx.is_null() { return; }
+        let (Ok(n), Ok(s)) = (CString::new(number), CString::new(sdp)) else { return };
+        unsafe { ffi::sofia_call_sdp(self.ctx, n.as_ptr(), s.as_ptr()) }
+    }
+
+    /// Answer the ringing call with `sdp` (WebRTC mode).
+    pub fn answer_call_sdp(&self, sdp: &str) {
+        if self.ctx.is_null() { return; }
+        let Ok(s) = CString::new(sdp) else { return };
+        unsafe { ffi::sofia_answer_sdp(self.ctx, s.as_ptr()) }
+    }
+
+    /// Send a re-INVITE carrying a renegotiated offer (hold/resume).
+    pub fn reinvite_sdp(&self, sdp: &str) {
+        if self.ctx.is_null() { return; }
+        let Ok(s) = CString::new(sdp) else { return };
+        unsafe { ffi::sofia_reinvite_sdp(self.ctx, s.as_ptr()) }
+    }
+
+    /// Answer a remote re-INVITE reported by [`SipEvent::ReinviteSdp`].
+    pub fn respond_sdp(&self, sdp: &str) {
+        if self.ctx.is_null() { return; }
+        let Ok(s) = CString::new(sdp) else { return };
+        unsafe { ffi::sofia_respond_sdp(self.ctx, s.as_ptr()) }
+    }
+
+    /// Start a consultation leg offering `sdp` verbatim (WebRTC mode).
+    pub fn start_consultation_sdp(&self, number: &str, sdp: &str) {
+        if self.ctx.is_null() { return; }
+        let (Ok(n), Ok(s)) = (CString::new(number), CString::new(sdp)) else { return };
+        unsafe { ffi::sofia_start_consultation_sdp(self.ctx, n.as_ptr(), s.as_ptr()) }
+    }
+
     pub fn make_call(&self, number: &str) {
         if self.ctx.is_null() { return; }
         let Ok(s) = CString::new(number) else { return; };
@@ -292,6 +346,16 @@ unsafe extern "C" fn sofia_event_cb(
         }
     };
 
+    /// Read a NUL-terminated `aux` string, which for the SDP events is a whole
+    /// SDP body rather than a short descriptor.
+    let aux_str = |aux: *const c_char| -> String {
+        if aux.is_null() {
+            String::new()
+        } else {
+            CStr::from_ptr(aux).to_string_lossy().into_owned()
+        }
+    };
+
     let parse_media = |aux: *const c_char| -> Option<(u16, String, u16, u8)> {
         let s = if aux.is_null() {
             String::new()
@@ -322,6 +386,9 @@ unsafe extern "C" fn sofia_event_cb(
                 None
             }
         }
+        ffi::SOFIA_EV_REMOTE_SDP => Some(SipEvent::RemoteSdp(aux_str(aux))),
+        ffi::SOFIA_EV_REINVITE_SDP => Some(SipEvent::ReinviteSdp(aux_str(aux))),
+        ffi::SOFIA_EV_CONSULT_REMOTE_SDP => Some(SipEvent::ConsultRemoteSdp(aux_str(aux))),
         ffi::SOFIA_EV_CALL_ENDED => Some(SipEvent::CallEnded),
         ffi::SOFIA_EV_CALL_FAILED => Some(SipEvent::CallFailed(
             friendly_call_failure(status, &phrase_str())

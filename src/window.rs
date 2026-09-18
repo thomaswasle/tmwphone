@@ -725,6 +725,19 @@ mod imp {
 
         pub fn handle_sip_event(&self, account_id: String, event: SipEvent) {
             match event {
+                // ── WebRTC mode ──────────────────────────────────────────
+                // Only reached when an account has `webrtc` enabled, which no
+                // engine does until the media layer (src/webrtc.rs) lands.
+                // Logged rather than ignored so a premature enable is visible
+                // instead of silently producing a call with no audio.
+                SipEvent::RemoteSdp(_)
+                | SipEvent::ReinviteSdp(_)
+                | SipEvent::ConsultRemoteSdp(_) => {
+                    log::warn!(
+                        "received WebRTC SDP for account {account_id}, but the \
+                         WebRTC media layer is not wired up yet — ignoring"
+                    );
+                }
                 SipEvent::Registered => {
                     let is_first = {
                         let mut engines = self.active_engines.borrow_mut();
