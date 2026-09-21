@@ -73,7 +73,7 @@ window.rs          — MainWindow: top-level UI orchestration, manages Vec<Activ
 - SIP messages are split off the TCP stream by `Content-Length` (`take_sip_message`), since a stream transport is not message-framed; leading CRLF keep-alives are discarded.
 - All I/O is `gio` async on the GLib main loop, so the bridge obeys the same single-threaded rule as the rest of the SIP layer.
 - In `glue.c`, `ctx->sip_bind_ip` (127.0.0.1 for WS/WSS) is deliberately **separate** from `ctx->local_ip`: the latter is also the SDP media address and must stay the real LAN address. WS accounts also build the registrar URI as a bare `sip:<server>` — the account's port is the HTTP port (80/443) and has no meaning in a SIP request-URI.
-- Tested by 21 unit tests plus an end-to-end test (`mod e2e`) that runs a real `WsBridge` against a minimal in-process WebSocket server; the framing is additionally checked against the RFC 6455 §1.3/§5.7 test vectors.
+- Tested by 25 unit tests plus an end-to-end test (`mod e2e`) that runs a real `WsBridge` against a minimal in-process WebSocket server; the framing is additionally checked against the RFC 6455 §1.3/§5.7 test vectors.
 
 ### Audio layer (`src/audio.rs`)
 
@@ -95,7 +95,7 @@ Used instead of `audio.rs` when an account has `webrtc` enabled. Unlike `AudioSe
 - Hold renegotiates the transceiver direction (`Sendonly`/`Sendrecv`) into a re-INVITE via `reinvite_sdp`, and silences the mic through the same `volume` element `AudioSession` uses. A failed hold renegotiation does **not** drop the call — the mic is already muted.
 - **Attended transfer is refused on WebRTC accounts** (the consult leg would need a second, independent `webrtcbin`); blind transfer uses REFER with no SDP and still works.
 - Requires `libgstreamer-plugins-bad1.0-dev` (the `gstreamer-webrtc-1.0` bindings) and `gstreamer1.0-nice` — without the latter `webrtcbin` refuses to create any pad, with "libnice elements are not available".
-- Tested by 14 unit tests over the pure SDP helpers plus an end-to-end test (`mod e2e`) that negotiates two real `WebrtcSession`s against each other and asserts the peer connection reaches `Connected`, i.e. the DTLS-SRTP handshake genuinely completes.
+- Tested by 14 unit tests over the pure SDP helpers plus two end-to-end tests (`mod e2e`) that negotiate two real `WebrtcSession`s against each other — one asserting the peer connection reaches `Connected`, i.e. the DTLS-SRTP handshake genuinely completes.
 
 ### Ringer (`src/ringer.rs`)
 
