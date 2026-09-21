@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# libgstreamer-plugins-bad1.0-dev provides gstreamer-webrtc-1.0 (webrtcbin, the
+# GstWebRTC bindings); gstreamer1.0-nice provides the ICE implementation
+# webrtcbin requires at runtime — without it webrtcbin refuses to create pads
+# with "libnice elements are not available".
 sudo apt-get update
 sudo apt-get install -y \
     build-essential \
@@ -13,6 +17,8 @@ sudo apt-get install -y \
     libsofia-sip-ua-glib-dev \
     libgstreamer1.0-dev \
     libgstreamer-plugins-base1.0-dev \
+    libgstreamer-plugins-bad1.0-dev \
+    gstreamer1.0-nice \
     libsecret-1-dev
 
 # Install Rust if not present

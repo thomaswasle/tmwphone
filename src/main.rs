@@ -7,10 +7,30 @@ mod keyring;
 mod quickdial;
 mod ringer;
 mod sip;
+mod webrtc;
 mod widgets;
 mod window;
 
 use gtk4::{glib, prelude::*};
+
+/// Helpers shared by tests in several modules.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    /// Serialises the tests that drive the default GLib main context.
+    ///
+    /// `MainContext::acquire()` gives exclusive ownership to one thread, and
+    /// the test harness runs tests in parallel — without this the second
+    /// acquirer fails rather than waiting its turn.
+    pub fn main_context_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        // A panicking test must not poison the lock for the others.
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+}
 
 fn main() {
     env_logger::init();
