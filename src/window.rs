@@ -9,6 +9,7 @@ use crate::audio::AudioSession;
 use crate::call_log;
 use crate::ringer::Ringer;
 use crate::sip::{SipEngine, SipEvent};
+use crate::webrtc::WebrtcSession;
 use crate::widgets::{CallScreen, Dialpad, SettingsDialog};
 
 mod imp {
@@ -30,6 +31,19 @@ mod imp {
         pub engine: SipEngine,
         pub registered: bool,
         pub last_register_ok: Option<i64>,
+        /// Account negotiates WebRTC media, so calls go through
+        /// [`WebrtcSession`] and the `*_sdp` engine entry points.
+        pub webrtc: bool,
+    }
+
+    /// Which side of the SDP exchange this client is on for the current
+    /// WebRTC call, which decides what an arriving remote SDP means.
+    #[derive(Copy, Clone, PartialEq, Debug)]
+    pub enum SdpRole {
+        /// We offered; the remote SDP is the answer.
+        Offerer,
+        /// They offered; the remote SDP is an offer we must answer.
+        Answerer,
     }
 
     // ── Window struct ─────────────────────────────────────────────────────────
@@ -71,6 +85,12 @@ mod imp {
         pub active_account_id: RefCell<Option<String>>,
 
         pub audio_session: RefCell<Option<AudioSession>>,
+        /// Media session for WebRTC accounts, in place of `audio_session`.
+        /// `Rc` because the async negotiation tasks outlive the call frame.
+        pub webrtc_session: RefCell<Option<std::rc::Rc<WebrtcSession>>>,
+        pub sdp_role: Cell<Option<SdpRole>>,
+        /// Offer from an incoming WebRTC call, held until the user answers.
+        pub pending_remote_offer: RefCell<Option<String>>,
         pub consult_session: RefCell<Option<AudioSession>>,
         pub ringer: RefCell<Option<Ringer>>,
         pub secondary_ringer: RefCell<Option<Ringer>>,
@@ -293,6 +313,9 @@ mod imp {
                         if let Some(session) = imp.consult_session.borrow().as_ref() {
                             session.set_muted(muted);
                         }
+                        if let Some(session) = imp.webrtc_session.borrow().as_ref() {
+                            session.set_muted(muted);
+                        }
                         None
                     }
                 ),
@@ -307,9 +330,35 @@ mod imp {
                     None,
                     move |args| {
                         let hold = args[1].get::<bool>().unwrap_or(false);
-                        obj.imp().with_active_engine(|e| e.set_hold(hold));
-                        if let Some(session) = obj.imp().audio_session.borrow().as_ref() {
+                        let imp = obj.imp();
+                        imp.with_active_engine(|e| e.set_hold(hold));
+                        if let Some(session) = imp.audio_session.borrow().as_ref() {
                             session.set_hold(hold);
+                        }
+                        // WebRTC: silence the mic now, then re-INVITE with a
+                        // renegotiated direction once webrtcbin has an offer.
+                        // glue.c's sofia_set_hold only records the flag here.
+                        if let Some(session) = imp.webrtc_session.borrow().clone() {
+                            session.set_hold(hold);
+                            let obj = obj.downgrade();
+                            glib::MainContext::default().spawn_local(async move {
+                                let result = session.renegotiate_hold(hold).await;
+                                let Some(obj) = obj.upgrade() else { return };
+                                let imp = obj.imp();
+                                match result {
+                                    Ok(sdp) => imp.with_active_engine(|e| e.reinvite_sdp(&sdp)),
+                                    // Hold is not worth dropping a live call
+                                    // over: the mic is already silenced, so the
+                                    // user still gets privacy, just without the
+                                    // peer's music-on-hold.
+                                    Err(e) => {
+                                        log::error!("webrtc: hold renegotiation: {e}");
+                                        imp.toast_overlay.add_toast(adw::Toast::new(
+                                            "Hold: the other side was not notified",
+                                        ));
+                                    }
+                                }
+                            });
                         }
                         None
                     }
@@ -357,7 +406,21 @@ mod imp {
                     None,
                     move |args| {
                         let number = args[1].get::<String>().unwrap_or_default();
-                        obj.imp().with_active_engine(|e| e.start_consultation(&number));
+                        let imp = obj.imp();
+                        // A consultation leg is a second, independent media
+                        // session; under WebRTC that means a second webrtcbin
+                        // with its own DTLS/ICE negotiation, which is not
+                        // built yet. Refuse plainly instead of dialling a leg
+                        // that would carry plain-RTP SDP into a DTLS-SRTP
+                        // account and connect with no audio. Blind transfer
+                        // uses REFER and no SDP, so it still works.
+                        if imp.active_is_webrtc() {
+                            imp.toast_overlay.add_toast(adw::Toast::new(
+                                "Attended transfer is not available on WebRTC                                  accounts — use blind transfer",
+                            ));
+                            return None;
+                        }
+                        imp.with_active_engine(|e| e.start_consultation(&number));
                         None
                     }
                 ),
@@ -505,6 +568,42 @@ mod imp {
             }
         }
 
+        /// Run `f` against a specific account's engine. Used by the async
+        /// WebRTC negotiation tasks, which resume after the original borrow of
+        /// `active_engines` is long gone.
+        fn with_engine<F: FnOnce(&SipEngine)>(&self, account_id: &str, f: F) {
+            let engines = self.active_engines.borrow();
+            if let Some(entry) = engines.iter().find(|e| e.account_id == account_id) {
+                f(&entry.engine);
+            }
+        }
+
+        fn active_is_webrtc(&self) -> bool {
+            let Some(id) = self.active_account_id.borrow().clone() else { return false };
+            self.active_engines
+                .borrow()
+                .iter()
+                .any(|e| e.account_id == id && e.webrtc)
+        }
+
+        /// Drop the WebRTC media session and any half-finished negotiation.
+        fn clear_webrtc(&self) {
+            *self.webrtc_session.borrow_mut() = None;
+            *self.pending_remote_offer.borrow_mut() = None;
+            self.sdp_role.set(None);
+        }
+
+        /// Report a negotiation failure and tear the call down — a WebRTC call
+        /// whose SDP exchange failed can never carry audio, so leaving it up
+        /// would present a connected call that is silent.
+        fn fail_webrtc(&self, what: &str, err: &str) {
+            log::error!("webrtc: {what}: {err}");
+            self.toast_overlay
+                .add_toast(adw::Toast::new(&format!("Media setup failed — {err}")));
+            self.with_active_engine(|e| e.hangup());
+            self.clear_webrtc();
+        }
+
         pub fn connect_account(&self, account: &crate::accounts::Account) {
             // Don't double-create.
             if self
@@ -547,6 +646,10 @@ mod imp {
                 },
             );
 
+            // Must be set before the first call: it switches glue.c from
+            // building SDP itself to carrying webrtcbin's verbatim.
+            engine.set_webrtc(account.webrtc);
+
             engine.register(crate::sip::SipConfig {
                 server: account.server.clone(),
                 username: account.username.clone(),
@@ -560,6 +663,7 @@ mod imp {
                 engine,
                 registered: false,
                 last_register_ok: Some(now_unix()),
+                webrtc: account.webrtc,
             });
 
             self.start_keepalive_timer();
@@ -725,18 +829,50 @@ mod imp {
 
         pub fn handle_sip_event(&self, account_id: String, event: SipEvent) {
             match event {
-                // ── WebRTC mode ──────────────────────────────────────────
-                // Only reached when an account has `webrtc` enabled, which no
-                // engine does until the media layer (src/webrtc.rs) lands.
-                // Logged rather than ignored so a premature enable is visible
-                // instead of silently producing a call with no audio.
-                SipEvent::RemoteSdp(_)
-                | SipEvent::ReinviteSdp(_)
-                | SipEvent::ConsultRemoteSdp(_) => {
-                    log::warn!(
-                        "received WebRTC SDP for account {account_id}, but the \
-                         WebRTC media layer is not wired up yet — ignoring"
-                    );
+                // ── WebRTC media negotiation ─────────────────────────────
+                SipEvent::RemoteSdp(sdp) => {
+                    let Some(session) = self.webrtc_session.borrow().clone() else {
+                        log::warn!("remote SDP with no media session — ignoring");
+                        return;
+                    };
+                    match self.sdp_role.get() {
+                        // Our INVITE was answered: apply it and start media.
+                        Some(SdpRole::Offerer) => {
+                            if let Err(e) = session.apply_answer(&sdp) {
+                                self.fail_webrtc("answer", &e);
+                            }
+                        }
+                        // An incoming call's offer. Hold it until the user
+                        // answers — answering is what commits us to a codec.
+                        Some(SdpRole::Answerer) => {
+                            *self.pending_remote_offer.borrow_mut() = Some(sdp);
+                        }
+                        None => log::warn!("remote SDP outside a WebRTC call — ignoring"),
+                    }
+                }
+                SipEvent::ReinviteSdp(sdp) => {
+                    // glue.c deferred the 200 OK: webrtcbin has to renegotiate
+                    // before we can answer.
+                    let Some(session) = self.webrtc_session.borrow().clone() else {
+                        log::warn!("re-INVITE with no media session — ignoring");
+                        return;
+                    };
+                    let obj = self.obj().downgrade();
+                    glib::MainContext::default().spawn_local(async move {
+                        let result = session.answer_reinvite(&sdp).await;
+                        let Some(obj) = obj.upgrade() else { return };
+                        let imp = obj.imp();
+                        match result {
+                            Ok(answer) => imp.with_active_engine(|e| e.respond_sdp(&answer)),
+                            Err(e) => imp.fail_webrtc("re-INVITE", &e),
+                        }
+                    });
+                }
+                SipEvent::ConsultRemoteSdp(_) => {
+                    // Attended transfer needs a second, independent webrtcbin
+                    // session; it is refused up front for WebRTC accounts, so
+                    // reaching here means a consult leg was started anyway.
+                    log::warn!("consultation SDP on a WebRTC account — not supported");
                 }
                 SipEvent::Registered => {
                     let is_first = {
@@ -796,6 +932,23 @@ mod imp {
                 }
 
                 SipEvent::IncomingCall { from } => {
+                    // Create the media session before the offer arrives — it
+                    // follows immediately after this event.
+                    let is_webrtc = self
+                        .active_engines
+                        .borrow()
+                        .iter()
+                        .any(|e| e.account_id == account_id && e.webrtc);
+                    if is_webrtc {
+                        self.clear_webrtc();
+                        match WebrtcSession::new() {
+                            Ok(s) => {
+                                *self.webrtc_session.borrow_mut() = Some(std::rc::Rc::new(s));
+                                self.sdp_role.set(Some(SdpRole::Answerer));
+                            }
+                            Err(e) => log::error!("webrtc: incoming call media: {e}"),
+                        }
+                    }
                     *self.active_account_id.borrow_mut() = Some(account_id);
                     *self.primary_caller.borrow_mut() = from.clone();
                     if let Some(cs) = self.call_screen.get() {
@@ -855,6 +1008,7 @@ mod imp {
                     *self.secondary_ringer.borrow_mut() = None;
                     *self.audio_session.borrow_mut() = None;
                     *self.consult_session.borrow_mut() = None;
+                    self.clear_webrtc();
                     *self.active_account_id.borrow_mut() = None;
                     if let Some(cs) = self.call_screen.get() {
                         cs.stop_timer();
@@ -874,6 +1028,7 @@ mod imp {
                     *self.secondary_ringer.borrow_mut() = None;
                     *self.audio_session.borrow_mut() = None;
                     *self.consult_session.borrow_mut() = None;
+                    self.clear_webrtc();
                     *self.active_account_id.borrow_mut() = None;
                     if let Some(cs) = self.call_screen.get() {
                         cs.stop_timer();
@@ -889,6 +1044,7 @@ mod imp {
                     *self.secondary_ringer.borrow_mut() = None;
                     *self.audio_session.borrow_mut() = None;
                     *self.consult_session.borrow_mut() = None;
+                    self.clear_webrtc();
                     *self.active_account_id.borrow_mut() = None;
                     if let Some(cs) = self.call_screen.get() {
                         cs.stop_timer();
@@ -1002,14 +1158,73 @@ mod imp {
                 connected_at: None,
             });
 
-            let engines = self.active_engines.borrow();
-            if let Some(entry) = engines.iter().find(|e| e.account_id == id) {
-                entry.engine.make_call(number);
+            let uses_webrtc = self
+                .active_engines
+                .borrow()
+                .iter()
+                .any(|e| e.account_id == id && e.webrtc);
+
+            if !uses_webrtc {
+                self.with_engine(&id, |e| e.make_call(number));
+                return;
             }
+
+            // WebRTC: the INVITE cannot be sent until webrtcbin has produced an
+            // offer and gathered ICE candidates, so dialling becomes async.
+            let session = match WebrtcSession::new() {
+                Ok(s) => std::rc::Rc::new(s),
+                Err(e) => {
+                    self.fail_webrtc("could not start media", &e);
+                    return;
+                }
+            };
+            *self.webrtc_session.borrow_mut() = Some(session.clone());
+            self.sdp_role.set(Some(SdpRole::Offerer));
+
+            let obj = self.obj().downgrade();
+            let number = number.to_owned();
+            glib::MainContext::default().spawn_local(async move {
+                let result = session.create_offer().await;
+                let Some(obj) = obj.upgrade() else { return };
+                let imp = obj.imp();
+                // The user may have hung up while ICE was gathering.
+                if imp.webrtc_session.borrow().is_none() {
+                    return;
+                }
+                match result {
+                    Ok(sdp) => imp.with_engine(&id, |e| e.make_call_sdp(&number, &sdp)),
+                    Err(e) => imp.fail_webrtc("offer", &e),
+                }
+            });
         }
 
         fn answer_call(&self) {
-            self.with_active_engine(|e| e.answer_call());
+            if !self.active_is_webrtc() {
+                self.with_active_engine(|e| e.answer_call());
+                return;
+            }
+
+            let (Some(session), Some(offer)) = (
+                self.webrtc_session.borrow().clone(),
+                self.pending_remote_offer.borrow().clone(),
+            ) else {
+                self.fail_webrtc("answer", "no offer received from the caller");
+                return;
+            };
+
+            let obj = self.obj().downgrade();
+            glib::MainContext::default().spawn_local(async move {
+                let result = session.create_answer(&offer).await;
+                let Some(obj) = obj.upgrade() else { return };
+                let imp = obj.imp();
+                if imp.webrtc_session.borrow().is_none() {
+                    return;
+                }
+                match result {
+                    Ok(sdp) => imp.with_active_engine(|e| e.answer_call_sdp(&sdp)),
+                    Err(e) => imp.fail_webrtc("answer", &e),
+                }
+            });
         }
 
         fn hangup_call(&self) {

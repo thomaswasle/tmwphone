@@ -1290,6 +1290,7 @@ mod e2e {
         // The bridge schedules its I/O on the default main context, so this
         // test owns that context and pumps it by hand.
         let _ = env_logger::builder().is_test(true).filter_level(log::LevelFilter::Trace).try_init();
+        let _lock = crate::test_support::main_context_lock();
         let main = glib::MainContext::default();
         let _guard = main.acquire().expect("default main context is free");
 

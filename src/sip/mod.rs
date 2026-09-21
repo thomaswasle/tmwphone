@@ -346,8 +346,8 @@ unsafe extern "C" fn sofia_event_cb(
         }
     };
 
-    /// Read a NUL-terminated `aux` string, which for the SDP events is a whole
-    /// SDP body rather than a short descriptor.
+    // Read a NUL-terminated `aux` string, which for the SDP events is a whole
+    // SDP body rather than a short descriptor.
     let aux_str = |aux: *const c_char| -> String {
         if aux.is_null() {
             String::new()

@@ -37,6 +37,7 @@ window.rs          — MainWindow: top-level UI orchestration, manages Vec<Activ
 │   ├── sip/glue.c — sofia-sip NUA integration (SIP signaling, SDP, digest auth)
 │   └── sip/wsbridge.rs — SIP-over-WebSocket transport (RFC 7118)
 ├── audio.rs       — AudioSession: GStreamer RTP pipelines (send + recv)
+├── webrtc.rs      — WebrtcSession: webrtcbin media (DTLS-SRTP + ICE)
 ├── ringer.rs      — Ringer: GStreamer tone-generator for incoming/ringback tones
 ├── call_log.rs    — CallLog: persistent call history (newest-first, max 500 records)
 ├── accounts.rs    — Account config: load/save JSON, migrate from GSettings
@@ -81,6 +82,21 @@ window.rs          — MainWindow: top-level UI orchestration, manages Vec<Activ
 - `rtpjitterbuffer latency=50` + `autoaudiosink sync=false` avoids a ~30 s startup silence caused by RTP timestamp mismatch.
 - Codec is negotiated by the SIP layer and passed as a `u8` (0 = PCMU, 8 = PCMA).
 
+### WebRTC media (`src/webrtc.rs`)
+
+Used instead of `audio.rs` when an account has `webrtc` enabled. Unlike `AudioSession`, which is handed already-negotiated RTP parameters, a `WebrtcSession` **owns the SDP**: `webrtcbin` produces the offer/answer and `glue.c` carries it verbatim (the `SOFIA_EV_*_SDP` events).
+
+- **Multi-codec, one transceiver.** Opus + PCMU + PCMA are offered as one m-line (`m=audio 9 UDP/TLS/RTP/SAVPF 111 0 8`) by setting the transceiver's `codec-preferences` to three-structure caps (`all_codec_caps`).
+- **The send chain is built after negotiation, not before.** `webrtcbin` binds one codec per sink pad and fixes the pad's caps at link time, but the *peer* picks the codec. So:
+  - *as offerer* — offer all three, read the codec out of the peer's answer (`resolve_codec`), then build the encoder chain and link `sink_%u`. Linking a sink pad **after** `set-remote-description` is supported and is what makes this work.
+  - *as answerer* — read the offer, pick a codec, pin `codec-preferences` to that one and set `direction = Sendrecv` (a transceiver derived from a remote offer starts out `recvonly`), then build the chain and answer. Without pinning, the answer echoes all three formats instead of narrowing.
+- **Codec choice follows the peer's order**, not ours: the first payload type in their m-line that we support wins. Static types (0/8) are recognised without an `a=rtpmap` (RFC 3551 §6).
+- **Vanilla ICE, not trickle** — SIP has no natural carrier for late candidates. Each offer/answer waits for `ice-gathering-state == complete` and is then read back from the **`local-description` property**; the description object returned by `create-offer` does *not* contain the candidates.
+- Hold renegotiates the transceiver direction (`Sendonly`/`Sendrecv`) into a re-INVITE via `reinvite_sdp`, and silences the mic through the same `volume` element `AudioSession` uses. A failed hold renegotiation does **not** drop the call — the mic is already muted.
+- **Attended transfer is refused on WebRTC accounts** (the consult leg would need a second, independent `webrtcbin`); blind transfer uses REFER with no SDP and still works.
+- Requires `libgstreamer-plugins-bad1.0-dev` (the `gstreamer-webrtc-1.0` bindings) and `gstreamer1.0-nice` — without the latter `webrtcbin` refuses to create any pad, with "libnice elements are not available".
+- Tested by 14 unit tests over the pure SDP helpers plus an end-to-end test (`mod e2e`) that negotiates two real `WebrtcSession`s against each other and asserts the peer connection reaches `Connected`, i.e. the DTLS-SRTP handshake genuinely completes.
+
 ### Ringer (`src/ringer.rs`)
 
 - `Ringer` owns a GStreamer pipeline (`audiotestsrc → volume → audioconvert → audioresample → autoaudiosink`) and drives a cadence via chained `glib::timeout_add_local` callbacks that toggle the `volume` element.
@@ -91,7 +107,7 @@ window.rs          — MainWindow: top-level UI orchestration, manages Vec<Activ
 
 ### Accounts (`src/accounts.rs`)
 
-- `Account` struct fields: `id` (hex timestamp + counter), `display_name`, `username`, `server`, `port` (u16, default 5060), `proxy` (outbound proxy host, empty = none), `transport` (`Transport` enum: `Udp` / `Tcp` / `Tls` / `Ws` / `Wss`, default `Udp`), `tls_verify` (bool), `tls_ca_file` (path to PEM CA, used when `tls_verify` is true and the transport is `Tls` or `Wss`), `ws_path` (WebSocket endpoint path, empty = `/ws`), `register_on_startup`.
+- `Account` struct fields: `id` (hex timestamp + counter), `display_name`, `username`, `server`, `port` (u16, default 5060), `proxy` (outbound proxy host, empty = none), `transport` (`Transport` enum: `Udp` / `Tcp` / `Tls` / `Ws` / `Wss`, default `Udp`), `tls_verify` (bool), `tls_ca_file` (path to PEM CA, used when `tls_verify` is true and the transport is `Tls` or `Wss`), `ws_path` (WebSocket endpoint path, empty = `/ws`), `webrtc` (negotiate DTLS-SRTP + ICE media instead of plain RTP — independent of transport, since a PBX can serve SIP over WSS with either), `register_on_startup`.
 - `Transport::default_port()` returns 5061 for TLS, 80 for WS, 443 for WSS, 5060 otherwise. `Transport::as_c_int()` maps to the `TRANSPORT_*` constants in `glue.h`. `Transport::is_websocket()` selects the transports served by the bridge rather than natively by sofia.
 - Persisted as JSON at `~/.local/share/tmwphone/accounts.json`. `load()` / `save()` are the only public API besides `Account::new()` and `Account::label()`.
 - `load()` includes a migration path for old entries where `port` was embedded in `server` as `"host:port"` — it splits them on the first load.
@@ -132,6 +148,8 @@ Schema: `io.github.thomaswasle.TMWPhone` (`data/io.github.thomaswasle.TMWPhone.g
 ## Key constraints
 
 - The entire application runs on the GTK main thread. `SipEngine` is explicitly not `Send`.
+- In WebRTC mode the local offer is retained by `glue.c` and a 401/407 retry re-sends **that exact SDP**. Regenerating it would change the ICE credentials and DTLS fingerprint mid-transaction, leaving the peer answering an offer we no longer hold.
+- A remote re-INVITE is not answered synchronously in WebRTC mode: `webrtcbin` cannot produce an answer inline, so the 200 OK is deferred to `sofia_respond_sdp`. Likewise `sofia_set_hold` only records the flag — building an offer there would emit plain-RTP SDP into a DTLS-SRTP session.
 - sofia-sip's `su_root` is attached to the default GLib main context — never call sofia-sip APIs from a background thread.
 - `udpsrc` must reach `State::Ready` before `udpsink` is constructed, so the socket can be shared (see audio layer above).
 - The SIP Contact header (built by `build_contact`, sent via `SIPTAG_CONTACT_STR` on every INVITE) **must** carry the bound SIP transport port (`ctx->local_sip_port`, the ephemeral port chosen for `NUTAG_URL`). NUA binds to an ephemeral port, not 5060, so a port-less Contact makes the peer route in-dialog requests — especially a remote-initiated BYE — to `:5060`, where nothing listens; the BYE is lost and the call never ends locally. Earlier code omitted the Contact entirely (sofia 1.13 drops it on some paths) or sent it without a port — both are wrong.
