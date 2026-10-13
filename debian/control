@@ -13,6 +13,7 @@ Build-Depends: debhelper-compat (= 13),
                libglib2.0-bin,
                libgstreamer1.0-dev,
                libgstreamer-plugins-base1.0-dev,
+               libgstreamer-plugins-bad1.0-dev,
                libsecret-1-dev,
                pkg-config
 Standards-Version: 4.7.0
@@ -23,7 +24,9 @@ Architecture: any
 Depends: ${shlibs:Depends}, ${misc:Depends},
          gstreamer1.0-plugins-good,
          gstreamer1.0-plugins-base,
-         gstreamer1.0-pulseaudio
+         gstreamer1.0-pulseaudio,
+         gstreamer1.0-plugins-bad,
+         gstreamer1.0-nice
 Description: SIP softphone client for GNOME
  TMWPhone is a SIP softphone designed for the GNOME desktop.
  It provides a clean, native GNOME user interface for making
